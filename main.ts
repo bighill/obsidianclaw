@@ -26,13 +26,13 @@ function str(v: unknown, fallback = ""): string {
 /** Create an SVG element from attributes (avoids innerHTML for ObsidianReviewBot compliance). */
 function createSvgIcon(parent: HTMLElement, svgSpec: { width: number; height: number; viewBox: string; children: Array<{ tag: string; attrs: Record<string, string> }> }, attrs?: Record<string, string>): SVGElement {
   const ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
+  const svg = parent.ownerDocument.createElementNS(ns, "svg");
   svg.setAttribute("width", String(svgSpec.width));
   svg.setAttribute("height", String(svgSpec.height));
   svg.setAttribute("viewBox", svgSpec.viewBox);
   if (attrs) { for (const [k, v] of Object.entries(attrs)) svg.setAttribute(k, v); }
   for (const child of svgSpec.children) {
-    const el = document.createElementNS(ns, child.tag);
+    const el = parent.ownerDocument.createElementNS(ns, child.tag);
     for (const [k, v] of Object.entries(child.attrs)) el.setAttribute(k, v);
     svg.appendChild(el);
   }
@@ -123,6 +123,8 @@ interface OpenClawSettings {
   streamItemsMap?: Record<string, StreamItem[]>;
   /** Saved tab order (non-Home tab keys) */
   tabOrder?: string[];
+  /** Suppress the close/reset confirmation modal when true. */
+  confirmCloseDisabled?: boolean;
 }
 
 const DEFAULT_SETTINGS: OpenClawSettings = {
@@ -158,8 +160,14 @@ function fromBase64Url(s: string): Uint8Array {
   return bytes;
 }
 
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
+}
+
 async function sha256Hex(data: Uint8Array): Promise<string> {
-  const hash = await crypto.subtle.digest("SHA-256", data.buffer);
+  const hash = await crypto.subtle.digest("SHA-256", toArrayBuffer(data));
   return Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
@@ -183,7 +191,7 @@ async function getOrCreateDeviceIdentity(
     const privBytes = fromBase64Url(devicePrivateKey);
     const cryptoKey = await crypto.subtle.importKey(
       "pkcs8",
-      privBytes,
+      toArrayBuffer(privBytes),
       { name: "Ed25519" },
       false,
       ["sign"]
@@ -220,7 +228,7 @@ async function signDevicePayload(identity: DeviceIdentity, payload: string): Pro
   // If cryptoKey doesn't have sign usage, re-import
   if (!cryptoKey) {
     const privBytes = fromBase64Url(identity.privateKey);
-    cryptoKey = await crypto.subtle.importKey("pkcs8", privBytes, { name: "Ed25519" }, false, ["sign"]);
+    cryptoKey = await crypto.subtle.importKey("pkcs8", toArrayBuffer(privBytes), { name: "Ed25519" }, false, ["sign"]);
   }
   const sig = await crypto.subtle.sign("Ed25519", cryptoKey, encoded);
   return toBase64Url(new Uint8Array(sig));
@@ -365,8 +373,8 @@ class GatewayClient {
   private connectNonce: string | null = null;
   private backoffMs = 800;
   private opts: GatewayClientOpts;
-  private connectTimer: ReturnType<typeof setTimeout> | null = null;
-  private pendingTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+  private connectTimer: number | null = null;
+  private pendingTimeouts = new Map<string, number>();
 
   constructor(opts: GatewayClientOpts) {
     this.opts = opts;
@@ -384,10 +392,10 @@ class GatewayClient {
   stop(): void {
     this.closed = true;
     if (this.connectTimer !== null) {
-      clearTimeout(this.connectTimer);
+      window.clearTimeout(this.connectTimer);
       this.connectTimer = null;
     }
-    for (const [, t] of this.pendingTimeouts) clearTimeout(t);
+    for (const [, t] of this.pendingTimeouts) window.clearTimeout(t);
     this.pendingTimeouts.clear();
     this.ws?.close();
     this.ws = null;
@@ -403,7 +411,7 @@ class GatewayClient {
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       // Timeout requests after 30s
-      const t = setTimeout(() => {
+      const t = window.setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
           reject(new Error("request timeout"));
@@ -440,13 +448,13 @@ class GatewayClient {
     if (this.closed) return;
     const delay = this.backoffMs;
     this.backoffMs = Math.min(this.backoffMs * 1.7, 15000);
-    setTimeout(() => this.doConnect(), delay);
+    window.setTimeout(() => this.doConnect(), delay);
   }
 
   private flushPending(err: Error): void {
     for (const [id, p] of this.pending) {
       const t = this.pendingTimeouts.get(id);
-      if (t) clearTimeout(t);
+      if (t) window.clearTimeout(t);
       p.reject(err);
     }
     this.pending.clear();
@@ -456,15 +464,15 @@ class GatewayClient {
   private queueConnect(): void {
     this.connectNonce = null;
     this.connectSent = false;
-    if (this.connectTimer !== null) clearTimeout(this.connectTimer);
-    this.connectTimer = setTimeout(() => void this.sendConnect(), 750);
+    if (this.connectTimer !== null) window.clearTimeout(this.connectTimer);
+    this.connectTimer = window.setTimeout(() => void this.sendConnect(), 750);
   }
 
   private async sendConnect(): Promise<void> {
     if (this.connectSent) return;
     this.connectSent = true;
     if (this.connectTimer !== null) {
-      clearTimeout(this.connectTimer);
+      window.clearTimeout(this.connectTimer);
       this.connectTimer = null;
     }
 
@@ -559,7 +567,7 @@ class GatewayClient {
       this.pending.delete(msgId);
       const t = this.pendingTimeouts.get(msgId);
       if (t) {
-        clearTimeout(t);
+        window.clearTimeout(t);
         this.pendingTimeouts.delete(msgId);
       }
       if (msg.ok) {
@@ -589,7 +597,7 @@ class OnboardingModal extends Modal {
   private step = 0;
   private path: "fresh" | "existing" | null = null;
   private statusEl: HTMLElement | null = null;
-  private pairingPollTimer: ReturnType<typeof setInterval> | null = null;
+  private pairingPollTimer: number | null = null;
 
   // Setup state for fresh install path
   private setupKeys = { claude1: '', claude2: '', googleai: '', brave: '', elevenlabs: '' };
@@ -614,7 +622,7 @@ class OnboardingModal extends Modal {
   }
 
   onClose(): void {
-    if (this.pairingPollTimer) { clearInterval(this.pairingPollTimer); this.pairingPollTimer = null; }
+    if (this.pairingPollTimer) { window.clearInterval(this.pairingPollTimer); this.pairingPollTimer = null; }
   }
 
   /** Safely render simple HTML (text, <a>, <code>, <strong>) into an element using DOM API */
@@ -627,7 +635,7 @@ class OnboardingModal extends Modal {
     for (const node of Array.from(source.childNodes)) {
       if (node.nodeType === Node.TEXT_NODE) {
         el.appendText(node.textContent ?? "");
-      } else if (node instanceof HTMLElement) {
+      } else if (node.instanceOf(HTMLElement)) {
         const tag = node.tagName.toLowerCase();
         if (tag === "a") {
           el.createEl("a", { text: node.textContent ?? "", href: node.getAttribute("href") ?? "" });
@@ -654,7 +662,7 @@ class OnboardingModal extends Modal {
         ? ["Start", "Connect", "Pair", "Done"]
         : ["Start"];
     const indicator = contentEl.createDiv("openclaw-onboard-steps");
-    stepLabels.forEach((label, i) => {
+    stepLabels.forEach((_label, i) => {
       const dot = indicator.createSpan("openclaw-step-dot" + (i === this.step ? " active" : i < this.step ? " done" : ""));
       dot.textContent = i < this.step ? "✓" : String(i + 1);
       if (i < stepLabels.length - 1) indicator.createSpan("openclaw-step-line" + (i < this.step ? " done" : ""));
@@ -766,7 +774,7 @@ class OnboardingModal extends Modal {
       select.addEventListener("change", () => { bot.model = select.value; });
 
       if (this.setupBots.length > 1) {
-        const removeBtn = row.createEl("span", { text: "×", cls: "oc-remove-btn" });
+        const removeBtn = row.createSpan({ text: "×", cls: "oc-remove-btn" });
         removeBtn.addEventListener("click", () => { this.setupBots.splice(i, 1); this.renderStep(); });
       }
     });
@@ -775,9 +783,9 @@ class OnboardingModal extends Modal {
     addBtn.addEventListener("click", () => { this.setupBots.push({ name: '', model: 'anthropic/claude-sonnet-4-6' }); this.renderStep(); });
 
     const note = el.createDiv("openclaw-onboard-hint oc-margin-top");
-    note.createEl("span", { text: "Each bot gets a folder like " });
+    note.createSpan({ text: "Each bot gets a folder like " });
     note.createEl("code", { text: "AGENT-YOURBOT/" });
-    note.createEl("span", { text: " in your vault." });
+    note.createSpan({ text: " in your vault." });
 
     this.statusEl = el.createDiv("openclaw-onboard-status");
 
@@ -1049,10 +1057,10 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
       await this.plugin.saveSettings();
 
       const ok = await new Promise<boolean>((resolve) => {
-        const timeout = setTimeout(() => { tc.stop(); resolve(false); }, 8000);
+        const timeout = window.setTimeout(() => { tc.stop(); resolve(false); }, 8000);
         const tc = new GatewayClient({
           url: normalizedUrl, token,
-          onHello: () => { clearTimeout(timeout); tc.stop(); resolve(true); },
+          onHello: () => { window.clearTimeout(timeout); tc.stop(); resolve(true); },
           onClose: () => {},
         });
         tc.start();
@@ -1063,7 +1071,7 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
 
       if (ok) {
         this.showStatus("✓ Connected!", "success");
-        setTimeout(() => { this.step = this.step + 1; this.renderStep(); }, 800);
+        window.setTimeout(() => { this.step = this.step + 1; this.renderStep(); }, 800);
       } else {
         this.showStatus("Could not connect. Check the troubleshooting steps below.", "error");
         troubleshoot.removeClass("oc-hidden");
@@ -1079,7 +1087,7 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
     box.addEventListener("click", () => {
       void navigator.clipboard.writeText(command).then(() => {
         btn.textContent = "✓";
-        setTimeout(() => btn.textContent = "Copy", 1500);
+        window.setTimeout(() => btn.textContent = "Copy", 1500);
       });
     });
     return box;
@@ -1133,7 +1141,7 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
         await this.plugin.connectGateway();
 
         // Wait a moment for connection to establish
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => window.setTimeout(r, 2000));
 
         if (!this.plugin.gatewayConnected) {
           this.showStatus("Could not connect to gateway. Go back and check your settings.", "error");
@@ -1146,7 +1154,7 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
           const result = await this.plugin.gateway!.request("sessions.list", {}) as { sessions?: unknown[] } | null;
           if (result?.sessions) {
             this.showStatus("✓ Device is paired and authorized!", "success");
-            setTimeout(() => { this.step = this.step + 1; this.renderStep(); }, 1000);
+            window.setTimeout(() => { this.step = this.step + 1; this.renderStep(); }, 1000);
             return;
           }
         } catch (e: unknown) {
@@ -1161,7 +1169,7 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
 
         // If we got here, connection works — might already be paired
         this.showStatus("✓ Connection working! Proceeding...", "success");
-        setTimeout(() => { this.step = this.step + 1; this.renderStep(); }, 1000);
+        window.setTimeout(() => { this.step = this.step + 1; this.renderStep(); }, 1000);
       } catch (e) {
         this.showStatus(`Error: ${e}`, "error");
         pairBtn.disabled = false;
@@ -1174,10 +1182,10 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
 
   private startPairingPoll(btn: HTMLButtonElement): void {
     let attempts = 0;
-    this.pairingPollTimer = setInterval(() => void (async () => {
+    this.pairingPollTimer = window.setInterval(() => void (async () => {
       attempts++;
       if (attempts > 60) { // 2 minutes
-        if (this.pairingPollTimer) clearInterval(this.pairingPollTimer);
+        if (this.pairingPollTimer) window.clearInterval(this.pairingPollTimer);
         this.showStatus("Timed out waiting for approval. You can approve later and re-run the setup wizard from settings.", "error");
         btn.disabled = false;
         return;
@@ -1185,9 +1193,9 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
       try {
         const result = await this.plugin.gateway?.request("sessions.list", {}) as { sessions?: unknown[] } | null;
         if (result?.sessions) {
-          if (this.pairingPollTimer) clearInterval(this.pairingPollTimer);
+          if (this.pairingPollTimer) window.clearInterval(this.pairingPollTimer);
           this.showStatus("✓ Device approved!", "success");
-          setTimeout(() => { this.step = this.step + 1; this.renderStep(); }, 1000);
+          window.setTimeout(() => { this.step = this.step + 1; this.renderStep(); }, 1000);
         }
       } catch { /* still waiting */ }
     })(), 2000);
@@ -1212,13 +1220,13 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
 
     const syncTip = el.createDiv("openclaw-onboard-info");
     syncTip.createEl("strong", { text: "💡 sync tip: " });
-    syncTip.createEl("span", {
+    syncTip.createSpan({
       text: "Enable Obsidian Sync to access your agent from multiple devices. Your chat settings and device keys sync automatically — set up once, works everywhere.",
     });
 
     const controlTip = el.createDiv("openclaw-onboard-info");
     controlTip.createEl("strong", { text: "🖥️ control UI: " });
-    const ctrlSpan = controlTip.createEl("span");
+    const ctrlSpan = controlTip.createSpan();
     ctrlSpan.setText("You can also manage your gateway from any browser on your Tailscale network. Just open your gateway URL in a browser.");
 
     const btnRow = el.createDiv("openclaw-onboard-buttons");
@@ -1285,8 +1293,8 @@ class OpenClawChatView extends ItemView {
     items: StreamItem[];
     splitPoints: number[];
     lastDeltaTime: number;
-    compactTimer: ReturnType<typeof setTimeout> | null;
-    workingTimer: ReturnType<typeof setTimeout> | null;
+    compactTimer: number | null;
+    workingTimer: number | null;
   }>();
   /** Map runId -> sessionKey so we can route stream events that lack sessionKey */
   private runToSession = new Map<string, string>();
@@ -1412,7 +1420,7 @@ class OpenClawChatView extends ItemView {
       this.renderHamburgerDropdown();
       this.hamburgerDropdownEl2.toggleClass("oc-open", !this.hamburgerDropdownEl2.hasClass("oc-open"));
     });
-    document.addEventListener("click", (e) => {
+    activeDocument.addEventListener("click", (e) => {
       if (!this.hamburgerDropdownEl2.contains(e.target as Node) && e.target !== hamburgerBtn && !hamburgerBtn.contains(e.target as Node)) {
         this.hamburgerDropdownEl2.removeClass("oc-open");
       }
@@ -1434,7 +1442,7 @@ class OpenClawChatView extends ItemView {
     this.profileDropdownEl.addClass("oc-hidden");
 
     // Close dropdown when clicking outside
-    document.addEventListener("click", () => { if (this.profileDropdownEl) this.profileDropdownEl.addClass("oc-hidden"); });
+    activeDocument.addEventListener("click", () => { if (this.profileDropdownEl) this.profileDropdownEl.addClass("oc-hidden"); });
 
     // We'll render tabs after loading sessions
     void this.renderTabs();
@@ -1443,7 +1451,7 @@ class OpenClawChatView extends ItemView {
 
     this.contextMeterEl = createDiv();
     this.contextFillEl = createDiv();
-    this.contextLabelEl = document.createElement("span");
+    this.contextLabelEl = createSpan();
     this.modelLabelEl = createDiv();
 
     // Status banner (compaction, etc.) — hidden by default
@@ -1532,7 +1540,7 @@ class OpenClawChatView extends ItemView {
       this.updateSendButton();
     });
     this.inputEl.addEventListener("focus", () => {
-      setTimeout(() => {
+      window.setTimeout(() => {
         this.inputEl.scrollIntoView({ block: "end", behavior: "smooth" });
       }, 300);
     });
@@ -1565,7 +1573,17 @@ class OpenClawChatView extends ItemView {
     // 1. Capacitor Keyboard.setResizeMode('native') — makes webview shrink with keyboard
     // 2. Hide Obsidian's bottom drawer elements when keyboard is open — they waste ~120px
     try {
-      const cap = (window as unknown as Record<string, unknown>).Capacitor as Record<string, Record<string, Record<string, CallableFunction>>> | undefined;
+      type KeyboardResizeMode = "none" | "native" | "body" | "ionic";
+      type KeyboardPlugin = {
+        setResizeMode?: (opts: { mode: KeyboardResizeMode }) => Promise<void> | void;
+        addListener: (eventName: "keyboardWillShow" | "keyboardDidHide", listener: () => void) => unknown;
+      };
+      type CapacitorRuntime = {
+        Plugins?: {
+          Keyboard?: KeyboardPlugin;
+        };
+      };
+      const cap = (window as unknown as { Capacitor?: CapacitorRuntime }).Capacitor;
       if (cap?.Plugins?.Keyboard) {
         const kb = cap.Plugins.Keyboard;
 
@@ -1616,7 +1634,7 @@ class OpenClawChatView extends ItemView {
 
         // Restore on view close
         this.register(() => {
-          kb.setResizeMode?.({ mode: 'none' });
+          void kb.setResizeMode?.({ mode: 'none' });
           onKeyboardHide();
           window.removeEventListener('keyboardWillShow', onKeyboardShow);
           window.removeEventListener('keyboardDidHide', onKeyboardHide);
@@ -1676,7 +1694,7 @@ class OpenClawChatView extends ItemView {
     this.pairingBannerEl = this.messagesEl.parentElement!.createDiv("openclaw-pairing-banner");
     this.messagesEl.parentElement!.insertBefore(this.pairingBannerEl, this.messagesEl);
 
-    this.pairingBannerEl.createEl("div", { text: "🔐 Device pairing required", cls: "openclaw-pairing-title" });
+    this.pairingBannerEl.createDiv({ text: "🔐 Device pairing required", cls: "openclaw-pairing-title" });
     this.pairingBannerEl.createEl("p", {
       text: "This device needs approval before it can connect.",
       cls: "openclaw-pairing-desc",
@@ -1690,7 +1708,7 @@ class OpenClawChatView extends ItemView {
     copyBox.addEventListener("click", () => {
       void navigator.clipboard.writeText("openclaw devices approve --latest").then(() => {
         copyBtn.textContent = "✓";
-        setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+        window.setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
       });
     });
 
@@ -2015,8 +2033,8 @@ class OpenClawChatView extends ItemView {
       items: [] as StreamItem[],
       splitPoints: [] as number[],
       lastDeltaTime: 0,
-      compactTimer: null as ReturnType<typeof setTimeout> | null,
-      workingTimer: null as ReturnType<typeof setTimeout> | null,
+      compactTimer: null as number | null,
+      workingTimer: null as number | null,
     };
     this.streams.set(sendSessionKey, ss);
     this.runToSession.set(runId, sendSessionKey);
@@ -2096,8 +2114,8 @@ class OpenClawChatView extends ItemView {
       items: [] as StreamItem[],
       splitPoints: [] as number[],
       lastDeltaTime: 0,
-      compactTimer: null as ReturnType<typeof setTimeout> | null,
-      workingTimer: null as ReturnType<typeof setTimeout> | null,
+      compactTimer: null as number | null,
+      workingTimer: null as number | null,
     };
     this.streams.set(sendSessionKey, ss);
     this.runToSession.set(runId, sendSessionKey);
@@ -2110,7 +2128,7 @@ class OpenClawChatView extends ItemView {
     this.scrollToBottom();
 
     // Fallback: if no events at all after 15s, show generic status
-    ss.compactTimer = setTimeout(() => {
+    ss.compactTimer = window.setTimeout(() => {
       const current = this.streams.get(sendSessionKey);
       if (current?.runId === runId && !current.text) {
         // Only update DOM if this session is still active tab
@@ -2133,7 +2151,7 @@ class OpenClawChatView extends ItemView {
       }
       await this.plugin.gateway.request("chat.send", sendParams);
     } catch (e) {
-      if (ss.compactTimer) clearTimeout(ss.compactTimer);
+      if (ss.compactTimer) window.clearTimeout(ss.compactTimer);
       this.messages.push({ role: "assistant", text: `Error: ${e}`, images: [], timestamp: Date.now() });
       this.streams.delete(sendSessionKey);
       this.runToSession.delete(runId);
@@ -2877,7 +2895,7 @@ class OpenClawChatView extends ItemView {
           deliver: false,
           idempotencyKey: "newtab-" + Date.now(),
         });
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => window.setTimeout(r, 500));
         try {
           await this.plugin.gateway?.request("sessions.patch", {
             key: `${this.agentPrefix}${sessionKey}`,
@@ -2910,14 +2928,14 @@ class OpenClawChatView extends ItemView {
   // ─── Confirm close dialog ──────────────────────────────────────────
 
   private isCloseConfirmDisabled(): boolean {
-    return localStorage.getItem("openclaw-confirm-close-disabled") === "true";
+    return this.plugin.getCloseConfirmDisabled();
   }
 
   private confirmTabClose(title: string, msg: string): Promise<boolean> {
     return new Promise(resolve => {
       const modal = new ConfirmCloseModal(this.app, title, msg, (result, dontAsk) => {
         if (result && dontAsk) {
-          localStorage.setItem("openclaw-confirm-close-disabled", "true");
+          this.plugin.setCloseConfirmDisabled(true);
         }
         resolve(result);
       });
@@ -3010,11 +3028,11 @@ class OpenClawChatView extends ItemView {
         idempotencyKey: "compact-" + Date.now(),
       });
       // Poll context meter to animate the decrease
-      const pollInterval = setInterval(() => void (async () => {
+      const pollInterval = window.setInterval(() => void (async () => {
         await this.updateContextMeter();
       })(), 2000);
-      setTimeout(() => void (async () => {
-        clearInterval(pollInterval);
+      window.setTimeout(() => void (async () => {
+        window.clearInterval(pollInterval);
         this.hideBanner();
         await this.loadHistory();
         await this.updateContextMeter();
@@ -3126,7 +3144,7 @@ class OpenClawChatView extends ItemView {
           width = Math.round(width * scale);
           height = Math.round(height * scale);
         }
-        const canvas = document.createElement("canvas");
+        const canvas = createEl("canvas");
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext("2d");
@@ -3235,30 +3253,21 @@ class OpenClawChatView extends ItemView {
   }
 
   private appendToolCall(label: string, url?: string, active = false): void {
-    const el = document.createElement("div");
-    el.className = "openclaw-tool-item" + (active ? " openclaw-tool-active" : "");
+    const el = createDiv({ cls: "openclaw-tool-item" + (active ? " openclaw-tool-active" : "") });
     if (url) {
-      const link = document.createElement("a");
-      link.href = url;
-      link.textContent = label;
-      link.className = "openclaw-tool-link";
+      const link = el.createEl("a", { text: label, href: url, cls: "openclaw-tool-link" });
       link.addEventListener("click", (e) => {
         e.preventDefault();
         window.open(url, "_blank");
       });
-      el.appendChild(link);
     } else {
-      const span = document.createElement("span");
-      span.textContent = label;
-      el.appendChild(span);
+      el.createSpan({ text: label });
     }
     if (active) {
-      const dots = document.createElement("span");
-      dots.className = "openclaw-tool-dots";
+      const dots = el.createSpan({ cls: "openclaw-tool-dots" });
       dots.createSpan("openclaw-dot");
       dots.createSpan("openclaw-dot");
       dots.createSpan("openclaw-dot");
-      el.appendChild(dots);
     }
     this.messagesEl.appendChild(el);
     this.scrollToBottom();
@@ -3305,7 +3314,10 @@ class OpenClawChatView extends ItemView {
     const runId = str(payload.runId, str(data?.runId));
     if (runId && this.runToSession.has(runId)) return this.runToSession.get(runId)!;
     // Last resort: if only one stream is active, use that
-    if (this.streams.size === 1) return this.streams.keys().next().value!;
+    if (this.streams.size === 1) {
+      const next = this.streams.keys().next();
+      return next.done ? null : next.value;
+    }
     return null;
   }
 
@@ -3323,7 +3335,7 @@ class OpenClawChatView extends ItemView {
         const cPhase = str(payloadData?.phase);
         if (isActiveTab || !sessionKey) {
           if (cPhase === "end") {
-            setTimeout(() => this.hideBanner(), 2000);
+            window.setTimeout(() => this.hideBanner(), 2000);
           } else {
             this.showBanner("Compacting context...");
           }
@@ -3340,7 +3352,7 @@ class OpenClawChatView extends ItemView {
       const timeSinceDelta = Date.now() - ss.lastDeltaTime;
       if (ss.text && timeSinceDelta > 1500) {
         if (!ss.workingTimer) {
-          ss.workingTimer = setTimeout(() => {
+          ss.workingTimer = window.setTimeout(() => {
             if (this.streams.has(sessionKey)) {
               if (isActiveTab && this.typingEl.hasClass("oc-hidden")) {
                 if (typingText) typingText.textContent = "Working";
@@ -3365,8 +3377,8 @@ class OpenClawChatView extends ItemView {
     const phase = str(payloadData?.phase, str(payload.phase));
 
     if ((stream === "tool" || toolName) && (phase === "start" || state === "tool_use")) {
-      if (ss.compactTimer) { clearTimeout(ss.compactTimer); ss.compactTimer = null; }
-      if (ss.workingTimer) { clearTimeout(ss.workingTimer); ss.workingTimer = null; }
+      if (ss.compactTimer) { window.clearTimeout(ss.compactTimer); ss.compactTimer = null; }
+      if (ss.workingTimer) { window.clearTimeout(ss.workingTimer); ss.workingTimer = null; }
       if (ss.text) {
         ss.splitPoints.push(ss.text.length);
       }
@@ -3387,7 +3399,7 @@ class OpenClawChatView extends ItemView {
       }
     } else if (stream === "compaction" || state === "compacting") {
       if (phase === "end") {
-        if (isActiveTab) setTimeout(() => this.hideBanner(), 2000);
+        if (isActiveTab) window.setTimeout(() => this.hideBanner(), 2000);
       } else {
         ss.toolCalls.push("Compacting memory");
         ss.items.push({ type: "tool", label: "Compacting memory" });
@@ -3436,8 +3448,8 @@ class OpenClawChatView extends ItemView {
     }
 
     if (chatState === "delta" && ss) {
-      if (ss.compactTimer) { clearTimeout(ss.compactTimer); ss.compactTimer = null; }
-      if (ss.workingTimer) { clearTimeout(ss.workingTimer); ss.workingTimer = null; }
+      if (ss.compactTimer) { window.clearTimeout(ss.compactTimer); ss.compactTimer = null; }
+      if (ss.workingTimer) { window.clearTimeout(ss.workingTimer); ss.workingTimer = null; }
       ss.lastDeltaTime = Date.now();
       const text = this.extractDeltaText(payload.message as Record<string, unknown> | string | undefined);
       if (text) {
@@ -3493,8 +3505,8 @@ class OpenClawChatView extends ItemView {
     const sk = sessionKey ?? this.activeSessionKey;
     const ss = this.streams.get(sk);
     if (ss) {
-      if (ss.compactTimer) clearTimeout(ss.compactTimer);
-      if (ss.workingTimer) clearTimeout(ss.workingTimer);
+      if (ss.compactTimer) window.clearTimeout(ss.compactTimer);
+      if (ss.workingTimer) window.clearTimeout(ss.workingTimer);
       this.runToSession.delete(ss.runId);
       this.streams.delete(sk);
     }
@@ -3556,29 +3568,21 @@ class OpenClawChatView extends ItemView {
 
   private createStreamItemEl(item: StreamItem): HTMLElement {
     if (item.type === "tool") {
-      const el = document.createElement("div");
-      el.className = "openclaw-tool-item";
+      const el = createDiv({ cls: "openclaw-tool-item" });
       if (item.url) {
-        const link = document.createElement("a");
-        link.href = item.url;
-        link.textContent = item.label;
-        link.className = "openclaw-tool-link";
+        const link = el.createEl("a", { text: item.label, href: item.url, cls: "openclaw-tool-link" });
         link.addEventListener("click", (e) => { e.preventDefault(); window.open(item.url, "_blank"); });
-        el.appendChild(link);
       } else {
         el.textContent = item.label;
       }
       return el;
     } else {
-      const details = document.createElement("details");
-      details.className = "openclaw-intermediary";
-      const summary = document.createElement("summary");
-      summary.className = "openclaw-intermediary-summary";
+      const details = createEl("details", { cls: "openclaw-intermediary" });
+      const summary = createEl("summary", { cls: "openclaw-intermediary-summary" });
       const preview = item.text.length > 60 ? item.text.slice(0, 60) + "..." : item.text;
       summary.textContent = preview;
       details.appendChild(summary);
-      const content = document.createElement("div");
-      content.className = "openclaw-intermediary-content";
+      const content = createDiv({ cls: "openclaw-intermediary-content" });
       content.textContent = item.text;
       details.appendChild(content);
       return details;
@@ -3645,9 +3649,9 @@ class OpenClawChatView extends ItemView {
           audio = new Audio(url);
 
           await new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(() => reject(new Error("timeout")), 10000);
-            audio!.addEventListener("canplaythrough", () => { clearTimeout(timer); resolve(); }, { once: true });
-            audio!.addEventListener("error", () => { clearTimeout(timer); reject(new Error("load error")); }, { once: true });
+            const timer = window.setTimeout(() => reject(new Error("timeout")), 10000);
+            audio!.addEventListener("canplaythrough", () => { window.clearTimeout(timer); resolve(); }, { once: true });
+            audio!.addEventListener("error", () => { window.clearTimeout(timer); reject(new Error("load error")); }, { once: true });
             audio!.load();
           });
 
@@ -3754,7 +3758,7 @@ class OpenClawChatView extends ItemView {
           });
           img.addEventListener("click", () => {
             // Open full-size in a modal-like overlay
-            const overlay = document.body.createDiv("openclaw-img-overlay");
+            const overlay = activeDocument.body.createDiv("openclaw-img-overlay");
             overlay.createEl("img", { attr: { src } });
             overlay.addEventListener("click", () => overlay.remove());
           });
@@ -3790,7 +3794,7 @@ class OpenClawChatView extends ItemView {
   private scrollToBottom(): void {
     if (this.messagesEl) {
       // Use requestAnimationFrame to ensure DOM has updated
-      requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
         this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
       });
     }
@@ -3850,7 +3854,7 @@ export default class OpenClawPlugin extends Plugin {
     // Show onboarding on first run, otherwise auto-connect and open chat
     if (!this.settings.onboardingComplete) {
       // Small delay so Obsidian finishes loading
-      setTimeout(() => new OnboardingModal(this.app, this).open(), 500);
+      window.setTimeout(() => new OnboardingModal(this.app, this).open(), 500);
     } else {
       void this.connectGateway();
       // Auto-open chat sidebar after workspace is ready
@@ -3867,7 +3871,17 @@ export default class OpenClawPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = (await this.loadData()) as Partial<OpenClawSettings> | null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data ?? {});
+  }
+
+  getCloseConfirmDisabled(): boolean {
+    return this.settings.confirmCloseDisabled === true;
+  }
+
+  setCloseConfirmDisabled(disabled: boolean): void {
+    this.settings.confirmCloseDisabled = disabled;
+    void this.saveSettings();
   }
 
   async saveSettings(): Promise<void> {
@@ -3947,13 +3961,13 @@ export default class OpenClawPlugin extends Plugin {
   async activateView(): Promise<void> {
     const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE);
     if (existing.length > 0) {
-      void this.app.workspace.revealLeaf(existing[0]);
+      this.app.workspace.setActiveLeaf(existing[0], { focus: true });
       return;
     }
     const leaf = this.app.workspace.getRightLeaf(false);
     if (leaf) {
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
-      void this.app.workspace.revealLeaf(leaf);
+      this.app.workspace.setActiveLeaf(leaf, { focus: true });
     }
   }
 
@@ -4352,9 +4366,9 @@ class OpenClawSettingTab extends PluginSettingTab {
       .setDesc("Show a confirmation dialog before closing or resetting tabs")
       .addToggle((toggle) =>
         toggle
-          .setValue(localStorage.getItem("openclaw-confirm-close-disabled") !== "true")
+          .setValue(!this.plugin.getCloseConfirmDisabled())
           .onChange((value) => {
-            localStorage.setItem("openclaw-confirm-close-disabled", value ? "false" : "true");
+            this.plugin.setCloseConfirmDisabled(!value);
           })
       );
 
