@@ -1,7 +1,8 @@
 /* ObsidianClaw — Modern Chat UI */
 
 /* ─── Utility classes (ObsidianReviewBot compliance) ─────────────── */
-.oc-hidden { display: none; }
+/* Keep hidden utility stronger than single-class display rules (without !important). */
+.oc-hidden.oc-hidden { display: none; }
 .oc-flex { display: flex; }
 .oc-block { display: block; }
 .oc-inline { display: inline; }
