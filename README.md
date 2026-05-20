@@ -16,20 +16,29 @@ Your vault becomes the workspace. Your AI lives in the sidebar. No browser tabs,
 
 ## Install
 
-> **Beta:** Pending approval in the Obsidian Community Plugin store ([PR #10465](https://github.com/obsidianmd/obsidian-releases/pull/10465)). Install via BRAT for now.
+### Official Community Plugin (recommended)
 
-1. In Obsidian, go to **Settings → Community Plugins → Browse**
-2. Search **BRAT** → Install → Enable
-3. Go to **Settings → BRAT → Add Beta Plugin**
-4. Enter: `oscarhenrycollins/obsidianclaw`
+1. In Obsidian, open **Settings → Community plugins → Browse**
+2. Search for **OpenClaw**
+3. Click **Install**, then **Enable**
 
-That's it. BRAT installs the plugin and keeps it updated. Works on desktop and mobile.
+Plugin page: https://community.obsidian.md/plugins/openclaw
+
+### BRAT (optional)
+
+If you want pre-release builds:
+
+1. Install **BRAT**
+2. **BRAT → Add Beta Plugin**
+3. Use repo: `oscarhenrycollins/obsidianclaw`
 
 ## Connect
 
 The setup wizard opens automatically after install:
 
-1. **Gateway URL:** `ws://<your-tailscale-ip>:18789`
+1. **Gateway URL:**
+   - Preferred: `https://<your-tailnet-hostname>` (plugin converts to `wss://.../ws`)
+   - Alternate: `ws://<your-tailscale-ip>:18789`
 2. **Auth Token:** from `~/.openclaw/openclaw.json` → `gateway.auth.token`
 3. Click **Test connection**
 4. **Approve the device** from the OpenClaw dashboard or CLI:
@@ -46,7 +55,8 @@ Done. The device is remembered permanently.
 - [Tailscale](https://tailscale.com/download) on all your devices
 - Gateway bound to Tailscale: `openclaw config set gateway.bind tailnet && openclaw gateway restart`
 
-> ⚠️ **OpenClaw 2026.3.x compatibility:** Versions 2026.3.1 through 2026.3.13 have a bug where `app://` origins (used by Obsidian) are silently rejected by the gateway. If you're on 2026.3.x and the plugin can't connect, downgrade to **2026.2.26**: `npm i -g openclaw@2026.2.26 && openclaw gateway restart`. This will be resolved in a future release.
+> If connection fails, first confirm gateway health and Serve routes:
+> `openclaw status` and `tailscale serve status`
 
 ## Commands
 
