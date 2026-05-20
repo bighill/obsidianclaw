@@ -1473,11 +1473,12 @@ class OpenClawChatView extends ItemView {
     resizeObserver.observe(container);
     this.register(() => resizeObserver.disconnect());
 
-    // Agent switcher button (right side of top bar)
+    // Agent switching lives in the control panel. Keep this legacy element hidden
+    // so the top-right UI matches ClawTabs' cleaner header.
     this.profileBtnEl = topBar.createDiv("openclaw-agent-btn");
+    this.profileBtnEl.addClass("oc-hidden");
     this.profileBtnEl.setAttribute("aria-label", "Switch agent");
     this.updateAgentButton();
-    this.profileBtnEl.addEventListener("click", (e) => { e.stopPropagation(); this.toggleAgentSwitcher(); });
 
     // Agent switcher dropdown (hidden by default)
     this.profileDropdownEl = container.createDiv("openclaw-agent-dropdown");
@@ -1527,17 +1528,17 @@ class OpenClawChatView extends ItemView {
     this.brainBtnEl.createSpan({ text: " ▾", cls: "openclaw-brain-btn-arrow" });
     this.brainBtnEl.addEventListener("click", () => this.openModelPicker());
 
-    // Bar control chips (thinking + verbose)
+    // Bar control chips (thinking + show steps)
     inputMeta.createSpan({ text: "·", cls: "oc-bar-sep" });
     this.thinkChipEl = inputMeta.createSpan({ text: "think: default", cls: "oc-bar-chip" });
     this.thinkChipEl.addEventListener("click", () => { void this.cycleBarControl("thinkingLevel", ["", "off", "low", "medium", "high"]); });
     inputMeta.createSpan({ text: "·", cls: "oc-bar-sep" });
-    this.verboseChipEl = inputMeta.createSpan({ text: "verbose: default", cls: "oc-bar-chip" });
+    this.verboseChipEl = inputMeta.createSpan({ text: "show steps: default", cls: "oc-bar-chip" });
     this.verboseChipEl.addEventListener("click", () => { void this.cycleBarControl("verboseLevel", ["", "off", "on", "full"]); });
     const inputRow = inputArea.createDiv("openclaw-input-row");
     // Attach button + hidden file input
     const attachBtn = inputRow.createEl("button", { cls: "openclaw-attach-btn", attr: { "aria-label": "Attach file" } });
-    setIcon(attachBtn, "paperclip");
+    setIcon(attachBtn, "plus");
     this.fileInputEl = inputArea.createEl("input", {
       cls: "openclaw-file-input",
       attr: { type: "file", accept: "image/*,.md,.txt,.json,.csv,.pdf,.yaml,.yml,.js,.ts,.py,.html,.css", multiple: "true" },
@@ -1724,17 +1725,20 @@ class OpenClawChatView extends ItemView {
     const panel = this.controlPanelEl;
     if (!panel) return;
     panel.empty();
-    const header = panel.createDiv("oc-control-panel-header");
-    const title = header.createDiv("oc-control-panel-title");
-    title.createSpan({ text: "Control panel" });
-    title.createEl("small", { text: this.plugin.gatewayConnected ? "connected" : "disconnected", cls: this.plugin.gatewayConnected ? "oc-panel-ok" : "oc-panel-warn" });
-    header.createEl("button", { text: "×", cls: "oc-control-panel-close", attr: { "aria-label": "Close" } }).addEventListener("click", () => this.closeControlPanel());
 
-    const identity = panel.createDiv("oc-control-card");
-    identity.createDiv({ text: "Agent", cls: "oc-control-card-label" });
-    identity.createDiv({ text: `${this.activeAgent.emoji || "🤖"} ${this.activeAgent.name || this.activeAgent.id || "main"}`, cls: "oc-control-card-value" });
+    const close = panel.createEl("button", { text: "×", cls: "oc-control-panel-close", attr: { "aria-label": "Close" } });
+    close.addEventListener("click", () => this.closeControlPanel());
+
+    const agentCard = panel.createDiv("oc-hud-agent-card");
+    const identity = agentCard.createDiv("oc-hud-identity");
+    const orb = identity.createDiv(`oc-hud-orb${this.plugin.gatewayConnected ? " online" : ""}`);
+    orb.createSpan({ text: this.activeAgent.emoji || "🤖", cls: "oc-hud-orb-emoji" });
+    const info = identity.createDiv("oc-hud-identity-info");
+    info.createDiv({ text: this.activeAgent.name || this.activeAgent.id || "Oscar", cls: "oc-hud-agent-name" });
+    info.createDiv({ text: this.plugin.gatewayConnected ? "online" : "disconnected", cls: `oc-hud-status-line${this.plugin.gatewayConnected ? " online" : ""}` });
+
     if (this.agents.length > 1) {
-      const agentsRow = identity.createDiv("oc-agent-row");
+      const agentsRow = agentCard.createDiv("oc-agent-row");
       for (const agent of this.agents) {
         const pill = agentsRow.createEl("button", { cls: `oc-agent-pill${agent.id === this.activeAgent.id ? " oc-agent-active" : ""}` });
         pill.createSpan({ text: agent.emoji || "🤖", cls: "oc-agent-pill-emoji" });
@@ -1746,38 +1750,43 @@ class OpenClawChatView extends ItemView {
       }
     }
 
-    const session = panel.createDiv("oc-control-card");
-    session.createDiv({ text: "Current tab", cls: "oc-control-card-label" });
-    session.createDiv({ text: this.tabSessions.find(t => t.key === this.activeSessionKey)?.label || "Home", cls: "oc-control-card-value" });
-    const sessionActions = session.createDiv("oc-control-actions");
-    sessionActions.createEl("button", { text: "new tab" }).addEventListener("click", () => { this.closeControlPanel(); void this.createNewTabAction(); });
-    sessionActions.createEl("button", { text: "reset" }).addEventListener("click", () => {
-      const current = this.tabSessions.find(t => t.key === this.activeSessionKey) || { key: this.activeSessionKey, label: "Home", pct: 0 };
-      this.closeControlPanel();
-      void this.resetTabAction(current);
-    });
+    const addGroup = (label: string) => panel.createDiv({ text: label, cls: "oc-hud-group-label" });
+    const addRow = (parent: HTMLElement, label: string, value: string, onClick?: () => void) => {
+      const row = parent.createEl("button", { cls: "oc-hud-section-toggle" });
+      row.createSpan({ text: label, cls: "oc-hud-section-label" });
+      row.createSpan({ text: value, cls: "oc-hud-section-value" });
+      row.createSpan({ text: "›", cls: "oc-hud-section-chevron" });
+      if (onClick) row.addEventListener("click", onClick);
+      else row.disabled = true;
+      return row;
+    };
 
-    const model = panel.createDiv("oc-control-card");
-    model.createDiv({ text: "Model", cls: "oc-control-card-label" });
-    model.createDiv({ text: this.currentModel || "default", cls: "oc-control-card-value" });
-    model.createEl("button", { text: "change model", cls: "oc-control-wide-btn" }).addEventListener("click", () => {
+    addGroup("CHAT");
+    const chat = panel.createDiv("oc-hud-section");
+    const current = this.tabSessions.find(t => t.key === this.activeSessionKey) || { key: this.activeSessionKey, label: "Home", pct: 0 };
+    addRow(chat, "Current tab", current.label || "Home", undefined);
+    addRow(chat, "New tab", "", () => { this.closeControlPanel(); void this.createNewTabAction(); });
+    addRow(chat, "Reset tab", "", () => { this.closeControlPanel(); void this.resetTabAction(current); });
+
+    addGroup("AI");
+    const ai = panel.createDiv("oc-hud-section");
+    addRow(ai, "Model", this.currentModel ? this.shortModelName(this.currentModel) : "default", () => {
       this.closeControlPanel();
       this.openModelPicker();
     });
+    addRow(ai, "Thinking", this.thinkingLevel || this.thinkingDefault || "default", () => void (async () => {
+      await this.cycleBarControl("thinkingLevel", ["", "off", "low", "medium", "high"]);
+      this.renderControlPanel();
+    })());
+    addRow(ai, "Show steps", this.verboseLevel || this.verboseDefault || "default", () => void (async () => {
+      await this.cycleBarControl("verboseLevel", ["", "off", "on", "full"]);
+      this.renderControlPanel();
+    })());
 
-    const behavior = panel.createDiv("oc-control-card");
-    behavior.createDiv({ text: "Behavior", cls: "oc-control-card-label" });
-    const thinking = this.thinkingLevel || this.thinkingDefault || "default";
-    const verbose = this.verboseLevel || this.verboseDefault || "default";
-    behavior.createDiv({ text: `thinking: ${thinking} · verbose: ${verbose}`, cls: "oc-control-card-value" });
-    const behaviorActions = behavior.createDiv("oc-control-actions");
-    behaviorActions.createEl("button", { text: "cycle thinking" }).addEventListener("click", () => void (async () => { await this.cycleBarControl("thinkingLevel", ["", "off", "low", "medium", "high"]); this.renderControlPanel(); })());
-    behaviorActions.createEl("button", { text: "cycle verbose" }).addEventListener("click", () => void (async () => { await this.cycleBarControl("verboseLevel", ["", "off", "on", "full"]); this.renderControlPanel(); })());
-
-    const gateway = panel.createDiv("oc-control-card");
-    gateway.createDiv({ text: "Gateway", cls: "oc-control-card-label" });
-    gateway.createDiv({ text: this.plugin.settings.gatewayUrl.replace(/^wss?:\/\//, "") || "not configured", cls: "oc-control-card-value oc-control-url" });
-    gateway.createEl("button", { text: "reconnect", cls: "oc-control-wide-btn" }).addEventListener("click", () => {
+    addGroup("CONNECTION");
+    const connection = panel.createDiv("oc-hud-section");
+    addRow(connection, "Gateway", this.plugin.settings.gatewayUrl.replace(/^wss?:\/\//, "") || "not configured", undefined);
+    addRow(connection, "Reconnect", "", () => {
       void this.plugin.connectGateway();
       this.renderControlPanel();
     });
@@ -1901,7 +1910,7 @@ class OpenClawChatView extends ItemView {
     }
   }
 
-  /** Load agent defaults (thinking/verbose) from gateway config */
+  /** Load agent defaults (thinking/show steps) from gateway config */
   async loadDefaults(): Promise<void> {
     if (!this.plugin.gateway?.connected) return;
     try {
@@ -1922,17 +1931,10 @@ class OpenClawChatView extends ItemView {
     }
   }
 
-  /** Update the agent button — hidden for single agent, visible for multi */
+  /** Update the legacy agent button. Agent switching now lives in the control panel. */
   private updateAgentButton(): void {
     if (!this.profileBtnEl) return;
-    if (this.agents.length <= 1) {
-      this.profileBtnEl.addClass("oc-hidden");
-      return;
-    }
-    this.profileBtnEl.removeClass("oc-hidden");
-    const emoji = this.activeAgent.emoji || "🤖";
-    this.profileBtnEl.empty();
-    this.profileBtnEl.createSpan({ text: emoji, cls: "openclaw-agent-emoji" });
+    this.profileBtnEl.addClass("oc-hidden");
   }
 
   /** Switch to a different agent */
@@ -2338,7 +2340,7 @@ class OpenClawChatView extends ItemView {
       if (session.displayName && session.displayName !== this.cachedSessionDisplayName) {
         this.cachedSessionDisplayName = session.displayName;
       }
-      // Update bar controls (thinking/verbose) from session data
+      // Update bar controls (thinking/show steps) from session data
       this.updateBarControlsFromSession(session);
       // Detect session list changes and re-render tabs when needed
       const agentPrefix = this.agentPrefix;
@@ -2381,7 +2383,7 @@ class OpenClawChatView extends ItemView {
     }
   }
 
-  // ─── Bar Controls (thinking / verbose) ────────────────────────────
+  // ─── Bar Controls (thinking / show steps) ────────────────────────────
 
   private barControlDefaultLabel(defaultVal: string): string {
     return defaultVal ? `default (${defaultVal})` : "default";
@@ -2395,7 +2397,7 @@ class OpenClawChatView extends ItemView {
     }
     if (this.verboseChipEl) {
       const label = this.verboseLevel || this.barControlDefaultLabel(this.verboseDefault);
-      this.verboseChipEl.textContent = "verbose: " + label;
+      this.verboseChipEl.textContent = "show steps: " + label;
       this.verboseChipEl.toggleClass("oc-bar-chip-active", !!this.verboseLevel);
     }
   }
@@ -2444,7 +2446,7 @@ class OpenClawChatView extends ItemView {
         this.tabBarEl.removeClass("oc-hamburger-mode");
         this.hamburgerBarEl.removeClass("oc-visible");
         this.hamburgerDropdownEl2.removeClass("oc-open");
-        if (this.agents.length > 1) this.profileBtnEl?.removeClass("oc-hidden");
+        this.profileBtnEl?.addClass("oc-hidden");
       }
     }
     if (shouldBeMobile) this.renderMobileTabSwitcher();

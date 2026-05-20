@@ -2127,3 +2127,140 @@
 @keyframes openclaw-spin {
   to { transform: rotate(360deg); }
 }
+
+/* ─── ClawTabs-style compact dashboard panel ───────────────────── */
+.openclaw-agent-btn { display: none !important; }
+
+.oc-control-panel {
+  width: min(260px, calc(100% - 18px)) !important;
+  left: 8px !important;
+  top: 8px !important;
+  bottom: 8px !important;
+  padding: 10px !important;
+  background: var(--background-secondary) !important;
+  border: 1px solid var(--background-modifier-border) !important;
+  border-radius: 0 12px 12px 0 !important;
+  box-shadow: 12px 0 32px rgba(0,0,0,0.22) !important;
+  font-family: var(--font-interface);
+}
+.oc-control-panel-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.55;
+}
+.oc-control-panel-close:hover { opacity: 1; background: rgba(128,128,128,0.12); }
+.oc-hud-agent-card {
+  background: rgba(128,128,128,0.04);
+  border: 1px solid rgba(128,128,128,0.10);
+  border-radius: 8px;
+  margin: 0 0 10px;
+  overflow: hidden;
+}
+.oc-hud-identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 36px 10px 12px;
+}
+.oc-hud-orb {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(128,128,128,0.12);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.oc-hud-orb.online { color: var(--text-normal); }
+.oc-hud-orb-emoji { font-size: 16px; line-height: 1; }
+.oc-hud-identity-info { min-width: 0; }
+.oc-hud-agent-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-normal);
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.oc-hud-status-line {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+.oc-hud-status-line.online { color: #4ade80; }
+.oc-hud-group-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  padding: 14px 10px 5px;
+}
+.oc-hud-section {
+  padding: 0 4px;
+  margin: 0 0 2px;
+}
+.oc-hud-section-toggle {
+  width: 100%;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-interface);
+}
+.oc-hud-section-toggle:disabled {
+  cursor: default;
+  opacity: 1;
+}
+.oc-hud-section-toggle:not(:disabled):hover {
+  background: rgba(128,128,128,0.10);
+  color: var(--text-normal);
+}
+.oc-hud-section-label {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+.oc-hud-section-toggle:not(:disabled):hover .oc-hud-section-label { color: var(--text-normal); }
+.oc-hud-section-value {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.oc-hud-section-chevron {
+  color: var(--text-faint);
+  opacity: 0.35;
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+.oc-hud-section-toggle:disabled .oc-hud-section-chevron { visibility: hidden; }
+.oc-agent-row {
+  border-top: 1px solid rgba(128,128,128,0.08);
+  padding: 8px;
+}
