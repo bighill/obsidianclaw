@@ -24,7 +24,9 @@ function str(v: unknown, fallback = ""): string {
 }
 
 /** Create an SVG element from attributes (avoids innerHTML for ObsidianReviewBot compliance). */
-function createSvgIcon(parent: HTMLElement, svgSpec: { width: number; height: number; viewBox: string; children: Array<{ tag: string; attrs: Record<string, string> }> }, attrs?: Record<string, string>): SVGElement {
+type SvgSpec = { width: number; height: number; viewBox: string; children: Array<{ tag: string; attrs: Record<string, string> }> };
+
+function createSvgIcon(parent: HTMLElement, svgSpec: SvgSpec, attrs?: Record<string, string>): SVGElement {
   const ns = "http://www.w3.org/2000/svg";
   const svg = parent.ownerDocument.createElementNS(ns, "svg");
   svg.setAttribute("width", String(svgSpec.width));
@@ -47,6 +49,14 @@ const SVG_HAMBURGER = {
     { tag: "line", attrs: { x1: "3", y1: "6", x2: "21", y2: "6", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
     { tag: "line", attrs: { x1: "3", y1: "12", x2: "21", y2: "12", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
     { tag: "line", attrs: { x1: "3", y1: "18", x2: "21", y2: "18", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+  ],
+};
+
+const SVG_CONTROL_PANEL: SvgSpec = {
+  width: 18, height: 18, viewBox: "0 0 24 24",
+  children: [
+    { tag: "rect", attrs: { x: "3", y: "3", width: "18", height: "18", rx: "2", fill: "none", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+    { tag: "line", attrs: { x1: "9", y1: "3", x2: "9", y2: "21", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
   ],
 };
 
@@ -322,6 +332,7 @@ interface HistoryMessage {
 type GatewayEventHandler = (event: { event: string; payload: GatewayPayload; seq?: number }) => void;
 type GatewayHelloHandler = (payload: GatewayPayload) => void;
 type GatewayCloseHandler = (info: { code: number; reason: string }) => void;
+type GatewayConnectErrorHandler = (message: string) => void;
 
 interface GatewayClientOpts {
   url: string;
@@ -330,6 +341,7 @@ interface GatewayClientOpts {
   onEvent?: GatewayEventHandler;
   onHello?: GatewayHelloHandler;
   onClose?: GatewayCloseHandler;
+  onConnectError?: GatewayConnectErrorHandler;
 }
 
 function generateId(): string {
@@ -534,8 +546,10 @@ class GatewayClient {
         this.backoffMs = 800;
         this.opts.onHello?.(payload as GatewayPayload);
       })
-      .catch(() => {
-        this.ws?.close(4008, "connect failed");
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.opts.onConnectError?.(message);
+        this.ws?.close(4008, message.slice(0, 120) || "connect failed");
       });
   }
 
@@ -1125,6 +1139,10 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
     opt2.createEl("p", { text: "Option 2 — Ask your bot:", cls: "openclaw-onboard-hint" });
     opt2.createEl("p", { text: "If you already have a channel connected (Telegram, Discord, etc.), just tell your bot: \"approve the pending device\"", cls: "openclaw-onboard-hint" });
 
+    const afterApproval = approvalInfo.createDiv("openclaw-onboard-numbered-item");
+    afterApproval.createEl("p", { text: "After approval:", cls: "openclaw-onboard-hint" });
+    afterApproval.createEl("p", { text: "Come back here and click “Check pairing status”. If it still says disconnected, close and reopen Obsidian once.", cls: "openclaw-onboard-hint" });
+
     const btnRow = el.createDiv("openclaw-onboard-buttons");
     btnRow.createEl("button", { text: "← back" }).addEventListener("click", () => { this.step = this.step - 1; this.renderStep(); });
 
@@ -1144,7 +1162,13 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
         await new Promise(r => window.setTimeout(r, 2000));
 
         if (!this.plugin.gatewayConnected) {
-          this.showStatus("Could not connect to gateway. Go back and check your settings.", "error");
+          const lastError = this.plugin.lastGatewayConnectError.toLowerCase();
+          if (lastError.includes("pair") || lastError.includes("device") || lastError.includes("approval") || lastError.includes("scope") || lastError.includes("auth")) {
+            this.showStatus("⏳ Pairing request sent. Approve it on the gateway, then click “Check pairing status”.\n\nIf you already approved it, wait a few seconds and click again.", "info");
+            pairBtn.textContent = "Check pairing status";
+          } else {
+            this.showStatus("Could not reach the gateway. Go back and check the gateway URL, token, Tailscale, and Serve status.", "error");
+          }
           pairBtn.disabled = false;
           return;
         }
@@ -1272,6 +1296,8 @@ class OpenClawChatView extends ItemView {
   private tabSwitcherActionsEl!: HTMLElement;
   private tabArrowLeftEl!: HTMLElement;
   private tabArrowRightEl!: HTMLElement;
+  private controlPanelEl!: HTMLElement;
+  private controlPanelBackdropEl!: HTMLElement;
   private isMobileMode = false;
   private brainBtnEl!: HTMLElement;
   private tabSessions: { key: string; label: string; pct: number }[] = [];
@@ -1376,12 +1402,24 @@ class OpenClawChatView extends ItemView {
     this.tabBarEl = topBar.createDiv("openclaw-tab-bar");
     this.tabBarEl.addEventListener("wheel", (e) => { e.preventDefault(); this.tabBarEl.scrollLeft += e.deltaY; }, { passive: false });
 
+    // Control panel button (left side, ClawTabs-style)
+    const controlBtn = topBar.createEl("button", { cls: "oc-control-panel-btn", attr: { "aria-label": "Control panel" } });
+    createSvgIcon(controlBtn, SVG_CONTROL_PANEL);
+    controlBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleControlPanel();
+    });
+
     // Hamburger bar (mobile mode — hidden by default)
     this.hamburgerBarEl = topBar.createDiv("oc-hamburger-bar");
 
-    // Hamburger button
-    const hamburgerBtn = this.hamburgerBarEl.createEl("button", { cls: "oc-hamburger-btn" });
-    createSvgIcon(hamburgerBtn, SVG_HAMBURGER);
+    // Mobile control panel button (left side)
+    const hamburgerControlBtn = this.hamburgerBarEl.createEl("button", { cls: "oc-hamburger-dash-btn", attr: { "aria-label": "Control panel" } });
+    createSvgIcon(hamburgerControlBtn, SVG_CONTROL_PANEL);
+    hamburgerControlBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleControlPanel();
+    });
 
     // Tab switcher
     const tabSwitcher = this.hamburgerBarEl.createDiv("oc-tab-switcher");
@@ -1396,6 +1434,10 @@ class OpenClawChatView extends ItemView {
     this.tabSwitcherMeterFillEl = switcherMeter.createDiv("oc-tab-switcher-meter-fill");
     this.tabArrowRightEl = tabSwitcher.createEl("button", { cls: "oc-tab-switcher-arrow oc-arrow-right" });
     createSvgIcon(this.tabArrowRightEl, SVG_CHEVRON_RIGHT);
+
+    // Hamburger button lives on the right in ClawTabs mobile mode
+    const hamburgerBtn = this.hamburgerBarEl.createEl("button", { cls: "oc-hamburger-btn", attr: { "aria-label": "Tabs" } });
+    createSvgIcon(hamburgerBtn, SVG_HAMBURGER);
 
     // Hamburger dropdown
     this.hamburgerDropdownEl2 = this.hamburgerBarEl.createDiv("oc-hamburger-dropdown");
@@ -1440,6 +1482,11 @@ class OpenClawChatView extends ItemView {
     // Agent switcher dropdown (hidden by default)
     this.profileDropdownEl = container.createDiv("openclaw-agent-dropdown");
     this.profileDropdownEl.addClass("oc-hidden");
+
+    // Control panel drawer (compact Obsidian version of ClawTabs dashboard)
+    this.controlPanelBackdropEl = container.createDiv("oc-control-panel-backdrop oc-hidden");
+    this.controlPanelEl = container.createDiv("oc-control-panel oc-hidden");
+    this.controlPanelBackdropEl.addEventListener("click", () => this.closeControlPanel());
 
     // Close dropdown when clicking outside
     activeDocument.addEventListener("click", () => { if (this.profileDropdownEl) this.profileDropdownEl.addClass("oc-hidden"); });
@@ -1650,6 +1697,90 @@ class OpenClawChatView extends ItemView {
       void this.loadAgents();
       void this.loadDefaults();
     }
+  }
+
+  private toggleControlPanel(): void {
+    if (!this.controlPanelEl || !this.controlPanelBackdropEl) return;
+    const open = this.controlPanelEl.hasClass("oc-open");
+    if (open) this.closeControlPanel();
+    else this.openControlPanel();
+  }
+
+  private openControlPanel(): void {
+    if (!this.controlPanelEl || !this.controlPanelBackdropEl) return;
+    this.renderControlPanel();
+    this.controlPanelBackdropEl.removeClass("oc-hidden");
+    this.controlPanelEl.removeClass("oc-hidden");
+    this.controlPanelEl.addClass("oc-open");
+  }
+
+  private closeControlPanel(): void {
+    this.controlPanelEl?.removeClass("oc-open");
+    this.controlPanelEl?.addClass("oc-hidden");
+    this.controlPanelBackdropEl?.addClass("oc-hidden");
+  }
+
+  private renderControlPanel(): void {
+    const panel = this.controlPanelEl;
+    if (!panel) return;
+    panel.empty();
+    const header = panel.createDiv("oc-control-panel-header");
+    const title = header.createDiv("oc-control-panel-title");
+    title.createSpan({ text: "Control panel" });
+    title.createEl("small", { text: this.plugin.gatewayConnected ? "connected" : "disconnected", cls: this.plugin.gatewayConnected ? "oc-panel-ok" : "oc-panel-warn" });
+    header.createEl("button", { text: "×", cls: "oc-control-panel-close", attr: { "aria-label": "Close" } }).addEventListener("click", () => this.closeControlPanel());
+
+    const identity = panel.createDiv("oc-control-card");
+    identity.createDiv({ text: "Agent", cls: "oc-control-card-label" });
+    identity.createDiv({ text: `${this.activeAgent.emoji || "🤖"} ${this.activeAgent.name || this.activeAgent.id || "main"}`, cls: "oc-control-card-value" });
+    if (this.agents.length > 1) {
+      const agentsRow = identity.createDiv("oc-agent-row");
+      for (const agent of this.agents) {
+        const pill = agentsRow.createEl("button", { cls: `oc-agent-pill${agent.id === this.activeAgent.id ? " oc-agent-active" : ""}` });
+        pill.createSpan({ text: agent.emoji || "🤖", cls: "oc-agent-pill-emoji" });
+        pill.createSpan({ text: agent.name || agent.id, cls: "oc-agent-pill-name" });
+        pill.addEventListener("click", () => void (async () => {
+          await this.switchAgent(agent);
+          this.renderControlPanel();
+        })());
+      }
+    }
+
+    const session = panel.createDiv("oc-control-card");
+    session.createDiv({ text: "Current tab", cls: "oc-control-card-label" });
+    session.createDiv({ text: this.tabSessions.find(t => t.key === this.activeSessionKey)?.label || "Home", cls: "oc-control-card-value" });
+    const sessionActions = session.createDiv("oc-control-actions");
+    sessionActions.createEl("button", { text: "new tab" }).addEventListener("click", () => { this.closeControlPanel(); void this.createNewTabAction(); });
+    sessionActions.createEl("button", { text: "reset" }).addEventListener("click", () => {
+      const current = this.tabSessions.find(t => t.key === this.activeSessionKey) || { key: this.activeSessionKey, label: "Home", pct: 0 };
+      this.closeControlPanel();
+      void this.resetTabAction(current);
+    });
+
+    const model = panel.createDiv("oc-control-card");
+    model.createDiv({ text: "Model", cls: "oc-control-card-label" });
+    model.createDiv({ text: this.currentModel || "default", cls: "oc-control-card-value" });
+    model.createEl("button", { text: "change model", cls: "oc-control-wide-btn" }).addEventListener("click", () => {
+      this.closeControlPanel();
+      this.openModelPicker();
+    });
+
+    const behavior = panel.createDiv("oc-control-card");
+    behavior.createDiv({ text: "Behavior", cls: "oc-control-card-label" });
+    const thinking = this.thinkingLevel || this.thinkingDefault || "default";
+    const verbose = this.verboseLevel || this.verboseDefault || "default";
+    behavior.createDiv({ text: `thinking: ${thinking} · verbose: ${verbose}`, cls: "oc-control-card-value" });
+    const behaviorActions = behavior.createDiv("oc-control-actions");
+    behaviorActions.createEl("button", { text: "cycle thinking" }).addEventListener("click", () => void (async () => { await this.cycleBarControl("thinkingLevel", ["", "off", "low", "medium", "high"]); this.renderControlPanel(); })());
+    behaviorActions.createEl("button", { text: "cycle verbose" }).addEventListener("click", () => void (async () => { await this.cycleBarControl("verboseLevel", ["", "off", "on", "full"]); this.renderControlPanel(); })());
+
+    const gateway = panel.createDiv("oc-control-card");
+    gateway.createDiv({ text: "Gateway", cls: "oc-control-card-label" });
+    gateway.createDiv({ text: this.plugin.settings.gatewayUrl.replace(/^wss?:\/\//, "") || "not configured", cls: "oc-control-card-value oc-control-url" });
+    gateway.createEl("button", { text: "reconnect", cls: "oc-control-wide-btn" }).addEventListener("click", () => {
+      void this.plugin.connectGateway();
+      this.renderControlPanel();
+    });
   }
 
   async onClose(): Promise<void> {
@@ -3812,6 +3943,7 @@ export default class OpenClawPlugin extends Plugin {
   settings: OpenClawSettings = DEFAULT_SETTINGS;
   gateway: GatewayClient | null = null;
   gatewayConnected = false;
+  lastGatewayConnectError = "";
   chatView: OpenClawChatView | null = null;
 
   async onload(): Promise<void> {
@@ -3891,6 +4023,7 @@ export default class OpenClawPlugin extends Plugin {
   async connectGateway(): Promise<void> {
     this.gateway?.stop();
     this.gatewayConnected = false;
+    this.lastGatewayConnectError = "";
     this.chatView?.updateStatus();
 
     const rawUrl = this.settings.gatewayUrl.trim();
@@ -3926,6 +4059,7 @@ export default class OpenClawPlugin extends Plugin {
       deviceIdentity,
       onHello: () => {
         this.gatewayConnected = true;
+        this.lastGatewayConnectError = "";
         this.chatView?.updateStatus();
         this.chatView?.hidePairingBanner(); // Dismiss pairing banner on successful connection
         void this.chatView?.loadHistory();
@@ -3942,9 +4076,13 @@ export default class OpenClawPlugin extends Plugin {
         this.gatewayConnected = false;
         this.chatView?.updateStatus();
         // Show pairing banner if needed
-        if (info.reason.includes("pairing required") || info.reason.includes("device identity required")) {
+        const reason = info.reason.toLowerCase();
+        if (reason.includes("pair") || reason.includes("device") || reason.includes("approval") || reason.includes("scope") || reason.includes("auth")) {
           this.chatView?.showPairingBanner();
         }
+      },
+      onConnectError: (message) => {
+        this.lastGatewayConnectError = message;
       },
       onEvent: (evt) => {
         if (evt.event === "chat") {
