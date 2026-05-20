@@ -2439,10 +2439,12 @@ class OpenClawChatView extends ItemView {
       if (shouldBeMobile) {
         this.tabBarEl.addClass("oc-hamburger-mode");
         this.hamburgerBarEl.addClass("oc-visible");
+        this.profileBtnEl?.addClass("oc-hidden");
       } else {
         this.tabBarEl.removeClass("oc-hamburger-mode");
         this.hamburgerBarEl.removeClass("oc-visible");
         this.hamburgerDropdownEl2.removeClass("oc-open");
+        if (this.agents.length > 1) this.profileBtnEl?.removeClass("oc-hidden");
       }
     }
     if (shouldBeMobile) this.renderMobileTabSwitcher();
@@ -2452,7 +2454,6 @@ class OpenClawChatView extends ItemView {
     const currentKey = this.plugin.settings.sessionKey || "main";
     const currentIdx = this.tabSessions.findIndex(t => t.key === currentKey);
     const current = currentIdx >= 0 ? this.tabSessions[currentIdx] : this.tabSessions[0];
-    const idx = currentIdx >= 0 ? currentIdx : 0;
     const isHome = current.key === "main";
 
     // Label
@@ -2475,34 +2476,12 @@ class OpenClawChatView extends ItemView {
     // Meter
     this.tabSwitcherMeterFillEl.setCssProps({ "--oc-meter-width": (current.pct || 0) + "%" });
 
-    // Arrows (invisible spacers when at boundaries)
-    this.tabArrowLeftEl.toggleClass("oc-visibility-hidden", idx <= 0);
-    this.tabArrowRightEl.toggleClass("oc-visibility-hidden", idx >= this.tabSessions.length - 1);
+    // Minimal mobile header: hide arrows
+    this.tabArrowLeftEl.addClass("oc-hidden");
+    this.tabArrowRightEl.addClass("oc-hidden");
 
-    // Actions
+    // Minimal mobile header: hide inline actions (reset/close)
     this.tabSwitcherActionsEl.empty();
-
-    // Reset button
-    const resetBtn = this.tabSwitcherActionsEl.createEl("button", { cls: "oc-tab-switcher-action" });
-    resetBtn.title = "Reset conversation";
-    createSvgIcon(resetBtn, SVG_RESET_10);
-    resetBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      void this.resetTabAction(current);
-    });
-
-    // Close button (real for non-home, invisible spacer for home)
-    const closeBtn = this.tabSwitcherActionsEl.createEl("button", { cls: "oc-tab-switcher-action oc-font-13" });
-    closeBtn.textContent = "×";
-    if (!isHome) {
-      closeBtn.title = "Close tab";
-      closeBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        void this.closeTabAction(current);
-      });
-    } else {
-      closeBtn.addClass("oc-visibility-hidden");
-    }
   }
 
   private startSwitcherRename(tab: { key: string; label: string; pct: number }): void {
