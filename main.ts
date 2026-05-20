@@ -1750,46 +1750,34 @@ class OpenClawChatView extends ItemView {
       }
     }
 
-    const addGroup = (label: string) => panel.createDiv({ text: label, cls: "oc-hud-group-label" });
-    const addRow = (parent: HTMLElement, label: string, value: string, onClick?: () => void) => {
-      const row = parent.createEl("button", { cls: "oc-hud-section-toggle" });
+    panel.createDiv({ text: "SETTINGS", cls: "oc-hud-group-label" });
+
+    const section = panel.createDiv("oc-hud-section");
+    const addRow = (label: string, value: string, onClick: (() => void) | null = null) => {
+      const row = section.createEl("button", { cls: "oc-hud-section-toggle" });
       row.createSpan({ text: label, cls: "oc-hud-section-label" });
       row.createSpan({ text: value, cls: "oc-hud-section-value" });
       row.createSpan({ text: "›", cls: "oc-hud-section-chevron" });
       if (onClick) row.addEventListener("click", onClick);
       else row.disabled = true;
-      return row;
     };
 
-    addGroup("CHAT");
-    const chat = panel.createDiv("oc-hud-section");
-    const current = this.tabSessions.find(t => t.key === this.activeSessionKey) || { key: this.activeSessionKey, label: "Home", pct: 0 };
-    addRow(chat, "Current tab", current.label || "Home", undefined);
-    addRow(chat, "New tab", "", () => { this.closeControlPanel(); void this.createNewTabAction(); });
-    addRow(chat, "Reset tab", "", () => { this.closeControlPanel(); void this.resetTabAction(current); });
-
-    addGroup("AI");
-    const ai = panel.createDiv("oc-hud-section");
-    addRow(ai, "Model", this.currentModel ? this.shortModelName(this.currentModel) : "default", () => {
+    addRow("AI MODEL DEFAULTS", this.currentModel ? this.shortModelName(this.currentModel) : "default", () => {
       this.closeControlPanel();
       this.openModelPicker();
     });
-    addRow(ai, "Thinking", this.thinkingLevel || this.thinkingDefault || "default", () => void (async () => {
+
+    const reliabilityValue = `thinking ${this.thinkingLevel || this.thinkingDefault || "default"} · steps ${this.verboseLevel || this.verboseDefault || "default"}`;
+    addRow("RELIABILITY DEFAULTS", reliabilityValue, () => void (async () => {
       await this.cycleBarControl("thinkingLevel", ["", "off", "low", "medium", "high"]);
-      this.renderControlPanel();
-    })());
-    addRow(ai, "Show steps", this.verboseLevel || this.verboseDefault || "default", () => void (async () => {
       await this.cycleBarControl("verboseLevel", ["", "off", "on", "full"]);
       this.renderControlPanel();
     })());
 
-    addGroup("CONNECTION");
-    const connection = panel.createDiv("oc-hud-section");
-    addRow(connection, "Gateway", this.plugin.settings.gatewayUrl.replace(/^wss?:\/\//, "") || "not configured", undefined);
-    addRow(connection, "Reconnect", "", () => {
-      void this.plugin.connectGateway();
-      this.renderControlPanel();
-    });
+    addRow("SERVER", this.plugin.settings.gatewayUrl.replace(/^wss?:\/\//, "") || "not configured", null);
+
+    const footer = panel.createDiv("oc-hud-footer");
+    footer.createSpan({ text: `OBSIDIANCLAW ${this.plugin.manifest.version}` });
   }
 
   async onClose(): Promise<void> {

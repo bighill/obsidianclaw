@@ -2264,3 +2264,86 @@
   border-top: 1px solid rgba(128,128,128,0.08);
   padding: 8px;
 }
+
+/* ─── ClawTabs closer panel pass (v2) ───────────────────────────── */
+.oc-control-panel {
+  left: 0 !important;
+  top: 0 !important;
+  bottom: 0 !important;
+  width: min(330px, 92%) !important;
+  border-radius: 0 !important;
+  border-left: none !important;
+  border-top: none !important;
+  border-bottom: none !important;
+  border-right: 1px solid var(--background-modifier-border) !important;
+  box-shadow: 12px 0 36px rgba(0,0,0,0.2) !important;
+  padding: calc(10px + env(safe-area-inset-top, 0px)) 10px calc(14px + env(safe-area-inset-bottom, 0px)) !important;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden !important;
+}
+.oc-hud-agent-card {
+  margin: 2px 4px 10px;
+  border-radius: 10px;
+}
+.oc-hud-group-label {
+  margin: 2px 6px 6px;
+  padding: 0;
+  font-size: 11px;
+}
+.oc-hud-section {
+  margin: 0 4px;
+  border: 1px solid rgba(128,128,128,0.14);
+  border-radius: 10px;
+  background: rgba(128,128,128,0.04);
+  overflow: hidden;
+}
+.oc-hud-section-toggle {
+  border-radius: 0 !important;
+  border-bottom: 1px solid rgba(128,128,128,0.12);
+  min-height: 44px;
+}
+.oc-hud-section-toggle:last-child { border-bottom: none; }
+.oc-hud-section-label {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+.oc-hud-section-value {
+  font-size: 12px;
+}
+.oc-hud-footer {
+  margin-top: auto;
+  padding: 10px 8px 0;
+  display: flex;
+  align-items: center;
+}
+.oc-hud-footer span {
+  display: inline-flex;
+  font-size: 12px;
+  color: var(--text-muted);
+  border: 1px solid rgba(128,128,128,0.18);
+  border-radius: 999px;
+  padding: 4px 10px;
+  letter-spacing: 0.02em;
+}
+[data-theme="light"] .oc-control-panel,
+.theme-light .oc-control-panel {
+  background: #f2f2f3 !important;
+  border-right-color: #d8d8dc !important;
+  box-shadow: none !important;
+}
+[data-theme="light"] .oc-hud-agent-card,
+.theme-light .oc-hud-agent-card {
+  background: #efefef !important;
+  border-color: #d5d5d8 !important;
+}
+[data-theme="light"] .oc-hud-section,
+.theme-light .oc-hud-section {
+  background: #f0f0f1 !important;
+  border-color: #d6d6da !important;
+}
+[data-theme="light"] .oc-hud-section-toggle,
+.theme-light .oc-hud-section-toggle {
+  border-bottom-color: #d9d9dc !important;
+}
