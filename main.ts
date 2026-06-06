@@ -16,7 +16,7 @@ import {
   setIcon,
 } from "obsidian";
 import { str } from "./lib";
-import { classifyFile, formatTextAttachment, detectMention, rankMentions, replaceMention } from "./at-mention";
+import { classifyFile, formatTextAttachment, detectMention, rankMentions, replaceMention, reconcileMentions } from "./at-mention";
 
 // ─── Settings ────────────────────────────────────────────────────────
 
@@ -3407,16 +3407,11 @@ class OpenClawChatView extends ItemView {
 
   /** Drop any inline @-mention attachment whose token is no longer in the textarea. */
   private reconcileInlineMentions(): void {
-    const value = this.inputEl.value;
-    let changed = false;
-    for (let i = this.pendingAttachments.length - 1; i >= 0; i--) {
-      const att = this.pendingAttachments[i];
-      if (att.inline && att.token && !value.includes(att.token)) {
-        this.pendingAttachments.splice(i, 1);
-        changed = true;
-      }
+    const survivors = reconcileMentions(this.inputEl.value, this.pendingAttachments);
+    if (survivors.length !== this.pendingAttachments.length) {
+      this.pendingAttachments = survivors;
+      this.updateSendButton();
     }
-    if (changed) this.updateSendButton();
   }
 
   async handleFileSelect(): Promise<void> {

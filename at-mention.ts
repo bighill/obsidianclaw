@@ -71,6 +71,20 @@ export function replaceMention(
 }
 
 /**
+ * Reconcile inline @-mention attachments against the textarea text: keep an
+ * inline attachment only while its exact `@<path>` token is still present.
+ * Non-inline (chip) attachments and inline ones without a token are always
+ * kept. Returns a new array; never mutates the input. This is how deleting the
+ * inline text "un-attaches" a file.
+ */
+export function reconcileMentions<T extends { inline?: boolean; token?: string }>(
+  value: string,
+  attachments: T[],
+): T[] {
+  return attachments.filter((a) => !(a.inline && a.token && !value.includes(a.token)));
+}
+
+/**
  * Rank vault files for the mention dropdown.
  *
  * With no query, returns the most-recently-modified files. With a query,

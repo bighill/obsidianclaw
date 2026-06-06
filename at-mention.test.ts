@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { truncate, wrapTextContent, formatTextAttachment, classifyFile, detectMention, rankMentions, replaceMention } from "./at-mention";
+import { truncate, wrapTextContent, formatTextAttachment, classifyFile, detectMention, rankMentions, replaceMention, reconcileMentions } from "./at-mention";
 
 // ─── truncate ────────────────────────────────────────────────────────
 
@@ -145,6 +145,44 @@ test("replaceMention: empty query (bare @) still replaces just the @", () => {
   const out = replaceMention("@", 0, 0, "@notes.md ");
   assert.equal(out.value, "@notes.md ");
   assert.equal(out.caret, "@notes.md ".length);
+});
+
+// ─── reconcileMentions ───────────────────────────────────────────────
+
+type Att = { name: string; inline?: boolean; token?: string };
+const chip: Att = { name: "pasted.png" };
+const md: Att = { name: "notes.md", inline: true, token: "@work/notes.md" };
+const img: Att = { name: "diagram.png", inline: true, token: "@art/diagram.png" };
+
+test("reconcileMentions: keeps inline attachments whose token is still in the text", () => {
+  const value = "review @work/notes.md and @art/diagram.png please";
+  assert.deepEqual(reconcileMentions(value, [md, img]), [md, img]);
+});
+
+test("reconcileMentions: drops inline attachments whose token was deleted", () => {
+  const value = "review @work/notes.md please"; // diagram token removed
+  assert.deepEqual(reconcileMentions(value, [md, img]), [md]);
+});
+
+test("reconcileMentions: dropping all inline tokens leaves an empty list", () => {
+  assert.deepEqual(reconcileMentions("nothing here", [md, img]), []);
+});
+
+test("reconcileMentions: always keeps non-inline (chip) attachments", () => {
+  // chip has no token; it must survive regardless of the textarea text.
+  assert.deepEqual(reconcileMentions("", [chip, md]), [chip]);
+});
+
+test("reconcileMentions: keeps an inline attachment that has no token (defensive)", () => {
+  const tokenless: Att = { name: "x.md", inline: true };
+  assert.deepEqual(reconcileMentions("", [tokenless]), [tokenless]);
+});
+
+test("reconcileMentions: returns the same items (no mutation of inputs)", () => {
+  const input = [md, img];
+  const out = reconcileMentions("@work/notes.md @art/diagram.png", input);
+  assert.notEqual(out, input); // new array
+  assert.deepEqual(input, [md, img]); // input untouched
 });
 
 // ─── rankMentions ────────────────────────────────────────────────────

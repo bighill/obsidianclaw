@@ -161,7 +161,7 @@ When a file is selected (`chooseMention`):
 - [x] Add the file to `pendingAttachments`, tagged `inline: true` + `token` (the exact `@<path>` inserted)
 - [x] **No chip** — inline mentions live in the textarea; `renderAttachPreview` skips `inline` entries (only file-picker/paste attachments get chips)
 - [x] Close the dropdown
-- [x] **Reconcile on input:** if the `@<path>` token is deleted/mangled in the textarea, `reconcileInlineMentions` drops the attachment (deleting the inline text is how you "un-attach")
+- [x] **Reconcile on input:** if the `@<path>` token is deleted/mangled in the textarea, the attachment is dropped (deleting the inline text is how you "un-attach"). Core extracted to pure `reconcileMentions(value, attachments)` — unit-tested (6 cases: keep/drop/all-gone/chip-always-kept/tokenless/no-mutation); `reconcileInlineMentions` is the thin DOM wrapper.
 
 > Known limitation: editing *inside* an existing `@<path>` token can re-open the picker (the `@` is still a valid trigger); Escape dismisses it. Token match is exact-substring, so a path that's a prefix of another could keep a removed attachment — unlikely in practice.
 
