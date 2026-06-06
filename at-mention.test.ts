@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { truncate, wrapTextContent, formatTextAttachment, classifyFile, detectMention, rankMentions, replaceMention, reconcileMentions } from "./at-mention";
+import { truncate, wrapTextContent, formatTextAttachment, splitFileBlocks, classifyFile, detectMention, rankMentions, replaceMention, reconcileMentions } from "./at-mention";
 
 // ─── truncate ────────────────────────────────────────────────────────
 
@@ -52,6 +52,41 @@ test("formatTextAttachment: notes truncation in the header and clips the body", 
     out,
     "File: big.md (1 line, truncated to 10000 chars)\n```\n" + "x".repeat(10000) + "\n...(truncated)\n```",
   );
+});
+
+// ─── splitFileBlocks ─────────────────────────────────────────────────
+
+test("splitFileBlocks: plain text is one text segment", () => {
+  assert.deepEqual(splitFileBlocks("just a question"), [
+    { type: "text", text: "just a question" },
+  ]);
+});
+
+test("splitFileBlocks: blank text yields no segments", () => {
+  assert.deepEqual(splitFileBlocks("   \n  "), []);
+});
+
+test("splitFileBlocks: separates a mention from its attached file block", () => {
+  const msg = formatTextAttachment("idea/spec.md", "a\nb\nc");
+  assert.deepEqual(splitFileBlocks(`@idea/spec.md summary please\n\n${msg}`), [
+    { type: "text", text: "@idea/spec.md summary please" },
+    { type: "file", label: "idea/spec.md (3 lines)", body: "a\nb\nc" },
+  ]);
+});
+
+test("splitFileBlocks: handles two attached files in one message", () => {
+  const msg = `look\n\n${formatTextAttachment("a.md", "aaa")}\n\n${formatTextAttachment("b.md", "bbb")}`;
+  assert.deepEqual(splitFileBlocks(msg), [
+    { type: "text", text: "look" },
+    { type: "file", label: "a.md (1 line)", body: "aaa" },
+    { type: "file", label: "b.md (1 line)", body: "bbb" },
+  ]);
+});
+
+test("splitFileBlocks: a file block with no surrounding text yields just the file", () => {
+  assert.deepEqual(splitFileBlocks(formatTextAttachment("only.md", "x")), [
+    { type: "file", label: "only.md (1 line)", body: "x" },
+  ]);
 });
 
 // ─── classifyFile ────────────────────────────────────────────────────

@@ -31,6 +31,36 @@ export function formatTextAttachment(label: string, content: string, max = 40000
   return wrapTextContent(`${label} (${meta})`, truncate(content, max));
 }
 
+/** A parsed chunk of a stored message: plain text, or a file attachment block. */
+export type MessageSegment =
+  | { type: "text"; text: string }
+  | { type: "file"; label: string; body: string };
+
+/**
+ * Split a stored message into text and file-attachment segments, inverting
+ * `wrapTextContent`/`formatTextAttachment`. A `File: <label>\n```\n…\n``` `
+ * block becomes a `file` segment (so the UI can collapse it behind a toggle
+ * instead of dumping the whole file into the history); everything else is
+ * `text`. Empty/whitespace-only spans between blocks are dropped. Matching is
+ * non-greedy, so a code fence inside the file body would close it early — an
+ * accepted limitation that mirrors the naive fence used when wrapping.
+ */
+export function splitFileBlocks(text: string): MessageSegment[] {
+  const segments: MessageSegment[] = [];
+  const re = /(^|\n)File: ([^\n]+)\n```\n([\s\S]*?)\n```/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const pre = text.slice(last, m.index).trim();
+    if (pre) segments.push({ type: "text", text: pre });
+    segments.push({ type: "file", label: m[2], body: m[3] });
+    last = m.index + m[0].length;
+  }
+  const rest = text.slice(last).trim();
+  if (rest) segments.push({ type: "text", text: rest });
+  return segments;
+}
+
 /** Bucket a file by mime type, falling back to extension, then binary. */
 export function classifyFile({ name, mimeType }: { name: string; mimeType: string }): FileKind {
   if (mimeType.startsWith("image/") || IMAGE_EXT.test(name)) return "image";

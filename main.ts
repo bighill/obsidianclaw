@@ -16,7 +16,7 @@ import {
   setIcon,
 } from "obsidian";
 import { str } from "./lib";
-import { classifyFile, formatTextAttachment, detectMention, rankMentions, replaceMention, reconcileMentions } from "./at-mention";
+import { classifyFile, formatTextAttachment, detectMention, rankMentions, replaceMention, reconcileMentions, splitFileBlocks } from "./at-mention";
 
 // ─── Settings ────────────────────────────────────────────────────────
 
@@ -2351,7 +2351,6 @@ class OpenClawChatView extends ItemView {
 
     // Build attachments for gateway
     let fullMessage = text;
-    const displayText = text;
     const userImages: string[] = [];
     const gatewayAttachments: { type: string; mimeType: string; content: string }[] = [];
     if (this.pendingAttachments.length > 0) {
@@ -2374,7 +2373,9 @@ class OpenClawChatView extends ItemView {
       this.attachPreviewEl.addClass("oc-hidden");
     }
 
-    this.messages.push({ role: "user", text: displayText || text, images: userImages, timestamp: Date.now() });
+    // Store the full message (incl. file blocks) locally so the just-sent
+    // bubble collapses attachments the same way reloaded history does.
+    this.messages.push({ role: "user", text: fullMessage || text, images: userImages, timestamp: Date.now() });
     await this.renderMessages();
 
     const runId = generateId();
@@ -4118,7 +4119,7 @@ class OpenClawChatView extends ItemView {
               bubble.createDiv({ text: displayText, cls: "openclaw-msg-text" });
             }
           } else {
-            bubble.createDiv({ text: displayText, cls: "openclaw-msg-text" });
+            this.renderUserText(bubble, displayText);
           }
         }
       }
@@ -4129,6 +4130,23 @@ class OpenClawChatView extends ItemView {
       }
     }
     this.scrollToBottom();
+  }
+
+  /**
+   * Render a user message, collapsing any attached file blocks (from
+   * `formatTextAttachment`) behind a toggle so the history shows the mention,
+   * not the whole file. Plain text renders as before.
+   */
+  private renderUserText(bubble: HTMLElement, text: string): void {
+    for (const seg of splitFileBlocks(text)) {
+      if (seg.type === "text") {
+        bubble.createDiv({ text: seg.text, cls: "openclaw-msg-text" });
+      } else {
+        const details = bubble.createEl("details", { cls: "openclaw-file-attachment" });
+        details.createEl("summary", { cls: "openclaw-file-summary", text: seg.label });
+        details.createEl("pre", { cls: "openclaw-file-body" }).createEl("code", { text: seg.body });
+      }
+    }
   }
 
   private scrollToBottom(): void {
