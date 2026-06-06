@@ -16,7 +16,7 @@ import {
   setIcon,
 } from "obsidian";
 import { str } from "./lib";
-import { classifyFile, truncate, wrapTextContent, detectMention, rankMentions } from "./at-mention";
+import { classifyFile, formatTextAttachment, detectMention, rankMentions } from "./at-mention";
 
 // ─── Settings ────────────────────────────────────────────────────────
 
@@ -3377,7 +3377,7 @@ class OpenClawChatView extends ItemView {
         });
       } else if (kind === "text") {
         const content = await this.app.vault.read(file);
-        this.pendingAttachments.push({ name: file.name, content: wrapTextContent(file.name, truncate(content)) });
+        this.pendingAttachments.push({ name: file.name, content: formatTextAttachment(file.path, content) });
       } else {
         this.pendingAttachments.push({ name: file.name, content: `[Attached file: ${file.name}]` });
       }
@@ -3417,7 +3417,7 @@ class OpenClawChatView extends ItemView {
           const content = await file.text();
           this.pendingAttachments.push({
             name: file.name,
-            content: wrapTextContent(file.name, truncate(content)),
+            content: formatTextAttachment(file.name, content),
           });
         } else {
           this.pendingAttachments.push({

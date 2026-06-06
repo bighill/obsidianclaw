@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { truncate, wrapTextContent, classifyFile, detectMention, rankMentions } from "./at-mention";
+import { truncate, wrapTextContent, formatTextAttachment, classifyFile, detectMention, rankMentions } from "./at-mention";
 
 // ─── truncate ────────────────────────────────────────────────────────
 
@@ -26,6 +26,31 @@ test("wrapTextContent fences content under a File: header", () => {
   assert.equal(
     wrapTextContent("notes.md", "line1\nline2"),
     "File: notes.md\n```\nline1\nline2\n```",
+  );
+});
+
+// ─── formatTextAttachment ────────────────────────────────────────────
+
+test("formatTextAttachment: header carries the label and line count", () => {
+  assert.equal(
+    formatTextAttachment("idea/spec.md", "a\nb\nc"),
+    "File: idea/spec.md (3 lines)\n```\na\nb\nc\n```",
+  );
+});
+
+test("formatTextAttachment: singular line is not pluralized", () => {
+  assert.equal(
+    formatTextAttachment("one.md", "just one line"),
+    "File: one.md (1 line)\n```\njust one line\n```",
+  );
+});
+
+test("formatTextAttachment: notes truncation in the header and clips the body", () => {
+  const content = "x".repeat(10001);
+  const out = formatTextAttachment("big.md", content, 10000);
+  assert.equal(
+    out,
+    "File: big.md (1 line, truncated to 10000 chars)\n```\n" + "x".repeat(10000) + "\n...(truncated)\n```",
   );
 });
 

@@ -14,8 +14,21 @@ export function truncate(content: string, max = 10000): string {
 }
 
 /** Wrap text-file content in a fenced block under a `File:` header. */
-export function wrapTextContent(name: string, content: string): string {
-  return `File: ${name}\n\`\`\`\n${content}\n\`\`\``;
+export function wrapTextContent(label: string, content: string): string {
+  return `File: ${label}\n\`\`\`\n${content}\n\`\`\``;
+}
+
+/**
+ * Build a text-file attachment with a metadata header: the (vault-relative)
+ * label, original line count, and a truncation note when the body was clipped.
+ * Gives the receiving agent enough to tell files apart and to know whether it's
+ * seeing the whole file. `label` should be the vault path when available.
+ */
+export function formatTextAttachment(label: string, content: string, max = 10000): string {
+  const lines = content.split("\n").length;
+  const clipped = content.length > max;
+  const meta = `${lines} line${lines === 1 ? "" : "s"}${clipped ? `, truncated to ${max} chars` : ""}`;
+  return wrapTextContent(`${label} (${meta})`, truncate(content, max));
 }
 
 /** Bucket a file by mime type, falling back to extension, then binary. */

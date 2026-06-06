@@ -1,6 +1,6 @@
 # @-Mention File Attachments — Implementation Plan
 
-**Status:** Phases 0–2 implemented; manual vault test + Phase 3 polish remain
+**Status:** Phases 0–2 implemented + manually tested OK; context-quality + Phase 3 polish remain
 **Branch:** feat/at-mention (local only — not pushed; `main` untouched)
 **Last updated:** 2026-06-05
 **Parent idea:** ~/garden/idea/openclaw-obsidian-at-mention-files.md
@@ -268,8 +268,8 @@ These come from testing the feature as a user (attaching the idea doc as @-menti
 
 ### Metadata and path clarity
 
-- [ ] **Include full vault-relative path, not just filename.** The current attachment format uses `File: filename.md` — if two files share a name in different directories (e.g. `PLAN.md` in two folders), the agent can't tell them apart. Change to `File: idea/openclaw-obsidian-at-mention-files.md` (vault-relative path).
-- [ ] **Add file size or line count to the attachment header.** Helps the agent gauge whether it's seeing the whole file or a truncated excerpt. E.g. `File: idea/openclaw-obsidian-at-mention-files.md (215 lines)` vs `File: PLAN.md (truncated at 10K chars)`.
+- [x] **Include full vault-relative path, not just filename.** `chooseMention` now passes `file.path` to `formatTextAttachment`, so @-mention text files arrive as `File: idea/openclaw-...md (...)`. (OS file-picker attachments still use the bare filename — that path has no vault location.)
+- [x] **Add line count + truncation note to the attachment header.** `formatTextAttachment(label, content)` emits `File: <label> (215 lines)` or `File: <label> (1 line, truncated to 10000 chars)`. Pure + unit-tested (3 cases). Original line count is reported even when the body is clipped.
 
 ### Rendering and readability
 
