@@ -24,7 +24,7 @@ export function wrapTextContent(label: string, content: string): string {
  * Gives the receiving agent enough to tell files apart and to know whether it's
  * seeing the whole file. `label` should be the vault path when available.
  */
-export function formatTextAttachment(label: string, content: string, max = 10000): string {
+export function formatTextAttachment(label: string, content: string, max = 40000): string {
   const lines = content.split("\n").length;
   const clipped = content.length > max;
   const meta = `${lines} line${lines === 1 ? "" : "s"}${clipped ? `, truncated to ${max} chars` : ""}`;

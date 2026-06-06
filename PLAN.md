@@ -262,9 +262,7 @@ These come from testing the feature as a user (attaching the idea doc as @-menti
 
 ### Truncation handling
 
-- [ ] **Raise or make the truncation limit configurable.** The idea doc (~200 lines) got cut off at "Handle `@@`..." with a `(truncated)` marker. For a spec/plan file this is a real data loss — the implementation phases and edge-case table were lost. Options: increase the default, add a setting, or at minimum ensure truncation cuts at a section boundary rather than mid-sentence.
-- [ ] **Move highest-signal content toward the top of attached files.** The edge-case table and MVP scope sections are the most actionable for implementation; they should appear early enough to survive truncation. Consider reordering plan files so critical sections come first, or splitting very long files into a summary + full-content attachment.
-- [ ] **For long files, attach a summary block (first ~50 lines) plus a "full content also attached" note** so key context always survives truncation. This is a content-formatting task for the files we write, but the plugin could also offer a `@summary` variant that only sends the first N lines.
+- [x] **Raised the truncation limit** from 10K → 40K chars (`formatTextAttachment` default; ~800 lines), which covers the idea/plan docs that were getting cut. A configurable setting and section-boundary-aware cutting are deferred — revisit only if 40K proves too small or too costly.
 
 ### Metadata and path clarity
 
@@ -273,9 +271,8 @@ These come from testing the feature as a user (attaching the idea doc as @-menti
 
 ### Rendering and readability
 
-- [ ] **Evaluate whether raw markdown-in-fenced-block is the best format.** Currently the file content arrives inside triple-backtick markdown blocks, meaning the agent sees raw `##`, `**`, and table pipes rather than rendered structure. This works but adds noise. Consider: (a) sending content without fencing if it's already markdown, or (b) at minimum, confirming that the receiving agent parses the fencing correctly and doesn't double-escape.
-- [ ] **Separate design decisions from implementation detail.** The chip-rendering options (A/B/C) are a design choice, not implementation — they could live in a `decisions.md` or a separate @-mentionable file, keeping the plan doc tighter for the truncation budget.
+- [ ] **Deferred — evaluate raw-markdown-in-fenced-block format.** Content arrives inside triple-backtick blocks, so the agent sees raw `##`/`**`/table pipes. Works fine and parses cleanly; revisit only if it proves noisy. (The "move design decisions to decisions.md" / content-reorg suggestions were dropped — those are about how docs are authored, not plugin behavior.)
 
-### Sender intent signal
+### Sender intent → inline @-mention (DECIDED: build it)
 
-- [ ] **Consider a brief intent prefix when attaching files.** When a file arrives as `@filename.md` with no context, the agent must infer why it was attached. The plugin can't read the user's mind, but it could encourage intent by: (a) inserting the filename at the cursor position (so the user naturally types around it, e.g. "review this spec @PLAN.md"), or (b) adding a small prompt hint in the UI like "Add context about what you want...". This is a UX touch, not a format change, but it directly improves the quality of agent responses.
+- [ ] **Insert the mention as inline text instead of strip-and-chip.** When a file is picked, replace the `@query` with an inline reference (e.g. `@notes.md`) and leave the caret after it, so the user types around it naturally ("review this spec @notes.md…"). The file is still attached. This **reverses** the current 2.4 behavior (strip `@query`, chip-only); update 2.4 + its tests/manual checks once built. Exact inline format (basename vs path vs `[[wikilink]]`) and whether the chip stays — see the pending decision.
