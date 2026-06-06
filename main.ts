@@ -6,6 +6,8 @@ import {
   Modal,
   Notice,
   Platform,
+  arrayBufferToBase64,
+  prepareFuzzySearch,
   Plugin,
   PluginSettingTab,
   Setting,
@@ -14,21 +16,43 @@ import {
   setIcon,
 } from "obsidian";
 import { str } from "./lib";
+import {
+  classifyFile,
+  formatTextAttachment,
+  detectMention,
+  rankMentions,
+  replaceMention,
+  reconcileMentions,
+  splitFileBlocks,
+} from "./at-mention";
 
 // ─── Settings ────────────────────────────────────────────────────────
 
-type StreamItem = { type: "tool"; label: string; url?: string; textPos?: number } | { type: "text"; text: string };
+type StreamItem =
+  | { type: "tool"; label: string; url?: string; textPos?: number }
+  | { type: "text"; text: string };
 
 /** Create an SVG element from attributes (avoids innerHTML for ObsidianReviewBot compliance). */
-type SvgSpec = { width: number; height: number; viewBox: string; children: Array<{ tag: string; attrs: Record<string, string> }> };
+type SvgSpec = {
+  width: number;
+  height: number;
+  viewBox: string;
+  children: Array<{ tag: string; attrs: Record<string, string> }>;
+};
 
-function createSvgIcon(parent: HTMLElement, svgSpec: SvgSpec, attrs?: Record<string, string>): SVGElement {
+function createSvgIcon(
+  parent: HTMLElement,
+  svgSpec: SvgSpec,
+  attrs?: Record<string, string>,
+): SVGElement {
   const ns = "http://www.w3.org/2000/svg";
   const svg = parent.ownerDocument.createElementNS(ns, "svg");
   svg.setAttribute("width", String(svgSpec.width));
   svg.setAttribute("height", String(svgSpec.height));
   svg.setAttribute("viewBox", svgSpec.viewBox);
-  if (attrs) { for (const [k, v] of Object.entries(attrs)) svg.setAttribute(k, v); }
+  if (attrs) {
+    for (const [k, v] of Object.entries(attrs)) svg.setAttribute(k, v);
+  }
   for (const child of svgSpec.children) {
     const el = parent.ownerDocument.createElementNS(ns, child.tag);
     for (const [k, v] of Object.entries(child.attrs)) el.setAttribute(k, v);
@@ -40,71 +64,240 @@ function createSvgIcon(parent: HTMLElement, svgSpec: SvgSpec, attrs?: Record<str
 
 // SVG icon definitions (reusable constants)
 const SVG_HAMBURGER = {
-  width: 22, height: 22, viewBox: "0 0 24 24",
+  width: 22,
+  height: 22,
+  viewBox: "0 0 24 24",
   children: [
-    { tag: "line", attrs: { x1: "3", y1: "6", x2: "21", y2: "6", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
-    { tag: "line", attrs: { x1: "3", y1: "12", x2: "21", y2: "12", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
-    { tag: "line", attrs: { x1: "3", y1: "18", x2: "21", y2: "18", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" } },
+    {
+      tag: "line",
+      attrs: {
+        x1: "3",
+        y1: "6",
+        x2: "21",
+        y2: "6",
+        stroke: "currentColor",
+        "stroke-width": "2",
+        "stroke-linecap": "round",
+      },
+    },
+    {
+      tag: "line",
+      attrs: {
+        x1: "3",
+        y1: "12",
+        x2: "21",
+        y2: "12",
+        stroke: "currentColor",
+        "stroke-width": "2",
+        "stroke-linecap": "round",
+      },
+    },
+    {
+      tag: "line",
+      attrs: {
+        x1: "3",
+        y1: "18",
+        x2: "21",
+        y2: "18",
+        stroke: "currentColor",
+        "stroke-width": "2",
+        "stroke-linecap": "round",
+      },
+    },
   ],
 };
 
 const SVG_CONTROL_PANEL: SvgSpec = {
-  width: 18, height: 18, viewBox: "0 0 24 24",
+  width: 18,
+  height: 18,
+  viewBox: "0 0 24 24",
   children: [
-    { tag: "rect", attrs: { x: "3", y: "3", width: "18", height: "18", rx: "2", fill: "none", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
-    { tag: "line", attrs: { x1: "9", y1: "3", x2: "9", y2: "21", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+    {
+      tag: "rect",
+      attrs: {
+        x: "3",
+        y: "3",
+        width: "18",
+        height: "18",
+        rx: "2",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    },
+    {
+      tag: "line",
+      attrs: {
+        x1: "9",
+        y1: "3",
+        x2: "9",
+        y2: "21",
+        stroke: "currentColor",
+        "stroke-width": "1.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    },
   ],
 };
 
 const SVG_CHEVRON_LEFT = {
-  width: 16, height: 16, viewBox: "0 0 24 24",
+  width: 16,
+  height: 16,
+  viewBox: "0 0 24 24",
   children: [
-    { tag: "polyline", attrs: { points: "15 18 9 12 15 6", fill: "none", stroke: "currentColor", "stroke-width": "2.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+    {
+      tag: "polyline",
+      attrs: {
+        points: "15 18 9 12 15 6",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    },
   ],
 };
 
 const SVG_CHEVRON_RIGHT = {
-  width: 16, height: 16, viewBox: "0 0 24 24",
+  width: 16,
+  height: 16,
+  viewBox: "0 0 24 24",
   children: [
-    { tag: "polyline", attrs: { points: "9 18 15 12 9 6", fill: "none", stroke: "currentColor", "stroke-width": "2.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+    {
+      tag: "polyline",
+      attrs: {
+        points: "9 18 15 12 9 6",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    },
   ],
 };
 
 const SVG_HOME_16 = {
-  width: 16, height: 16, viewBox: "0 0 24 24",
+  width: 16,
+  height: 16,
+  viewBox: "0 0 24 24",
   children: [
-    { tag: "path", attrs: { d: "M12 3l9 8h-3v9h-5v-6h-2v6H6v-9H3l9-8z", fill: "currentColor" } },
+    {
+      tag: "path",
+      attrs: {
+        d: "M12 3l9 8h-3v9h-5v-6h-2v6H6v-9H3l9-8z",
+        fill: "currentColor",
+      },
+    },
   ],
 };
 
 const SVG_HOME_18 = {
-  width: 18, height: 18, viewBox: "0 0 24 24",
+  width: 18,
+  height: 18,
+  viewBox: "0 0 24 24",
   children: [
-    { tag: "path", attrs: { d: "M12 3l9 8h-3v9h-5v-6h-2v6H6v-9H3l9-8z", fill: "currentColor" } },
+    {
+      tag: "path",
+      attrs: {
+        d: "M12 3l9 8h-3v9h-5v-6h-2v6H6v-9H3l9-8z",
+        fill: "currentColor",
+      },
+    },
   ],
 };
 
 const SVG_RESET_10 = {
-  width: 10, height: 10, viewBox: "0 0 24 24",
+  width: 10,
+  height: 10,
+  viewBox: "0 0 24 24",
   children: [
-    { tag: "path", attrs: { d: "M1 4v6h6", fill: "none", stroke: "currentColor", "stroke-width": "2.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
-    { tag: "path", attrs: { d: "M3.51 15a9 9 0 105.64-12.28L1 10", fill: "none", stroke: "currentColor", "stroke-width": "2.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+    {
+      tag: "path",
+      attrs: {
+        d: "M1 4v6h6",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    },
+    {
+      tag: "path",
+      attrs: {
+        d: "M3.51 15a9 9 0 105.64-12.28L1 10",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    },
   ],
 };
 
 const SVG_RESET_11 = {
-  width: 11, height: 11, viewBox: "0 0 24 24",
+  width: 11,
+  height: 11,
+  viewBox: "0 0 24 24",
   children: [
-    { tag: "path", attrs: { d: "M1 4v6h6", fill: "none", stroke: "currentColor", "stroke-width": "2.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
-    { tag: "path", attrs: { d: "M3.51 15a9 9 0 105.64-12.28L1 10", fill: "none", stroke: "currentColor", "stroke-width": "2.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+    {
+      tag: "path",
+      attrs: {
+        d: "M1 4v6h6",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    },
+    {
+      tag: "path",
+      attrs: {
+        d: "M3.51 15a9 9 0 105.64-12.28L1 10",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    },
   ],
 };
 
 const SVG_RESET_12 = {
-  width: 12, height: 12, viewBox: "0 0 24 24",
+  width: 12,
+  height: 12,
+  viewBox: "0 0 24 24",
   children: [
-    { tag: "path", attrs: { d: "M1 4v6h6", fill: "none", stroke: "currentColor", "stroke-width": "2.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
-    { tag: "path", attrs: { d: "M3.51 15a9 9 0 105.64-12.28L1 10", fill: "none", stroke: "currentColor", "stroke-width": "2.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+    {
+      tag: "path",
+      attrs: {
+        d: "M1 4v6h6",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    },
+    {
+      tag: "path",
+      attrs: {
+        d: "M3.51 15a9 9 0 105.64-12.28L1 10",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      },
+    },
   ],
 };
 
@@ -119,8 +312,8 @@ interface OpenClawSettings {
   gatewayUrl: string;
   token: string;
   sessionKey: string;
-  activeAgentId?: string;  // currently selected agent id
-  currentModel?: string;  // persisted model selection (provider/model format)
+  activeAgentId?: string; // currently selected agent id
+  currentModel?: string; // persisted model selection (provider/model format)
   onboardingComplete: boolean;
   deviceId?: string;
   devicePublicKey?: string;
@@ -155,11 +348,16 @@ function normalizeGatewayUrl(raw: string): string | null {
 function toBase64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 function fromBase64Url(s: string): Uint8Array {
-  const padded = s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (s.length % 4)) % 4);
+  const padded =
+    s.replace(/-/g, "+").replace(/_/g, "/") +
+    "=".repeat((4 - (s.length % 4)) % 4);
   const binary = atob(padded);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -174,7 +372,9 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 
 async function sha256Hex(data: Uint8Array): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", toArrayBuffer(data));
-  return Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(hash), (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
 }
 
 interface DeviceIdentity {
@@ -186,12 +386,14 @@ interface DeviceIdentity {
 
 async function getOrCreateDeviceIdentity(
   loadData: () => Promise<Record<string, unknown> | null>,
-  saveData: (data: Record<string, unknown>) => Promise<void>
+  saveData: (data: Record<string, unknown>) => Promise<void>,
 ): Promise<DeviceIdentity> {
   const data = await loadData();
   const deviceId = typeof data?.deviceId === "string" ? data.deviceId : null;
-  const devicePublicKey = typeof data?.devicePublicKey === "string" ? data.devicePublicKey : null;
-  const devicePrivateKey = typeof data?.devicePrivateKey === "string" ? data.devicePrivateKey : null;
+  const devicePublicKey =
+    typeof data?.devicePublicKey === "string" ? data.devicePublicKey : null;
+  const devicePrivateKey =
+    typeof data?.devicePrivateKey === "string" ? data.devicePrivateKey : null;
   if (deviceId && devicePublicKey && devicePrivateKey) {
     // Restore existing identity
     const privBytes = fromBase64Url(devicePrivateKey);
@@ -200,7 +402,7 @@ async function getOrCreateDeviceIdentity(
       toArrayBuffer(privBytes),
       { name: "Ed25519" },
       false,
-      ["sign"]
+      ["sign"],
     );
     return {
       deviceId,
@@ -211,9 +413,16 @@ async function getOrCreateDeviceIdentity(
   }
 
   // Generate new Ed25519 keypair
-  const keyPair = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
-  const pubRaw = new Uint8Array(await crypto.subtle.exportKey("raw", keyPair.publicKey));
-  const privPkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", keyPair.privateKey));
+  const keyPair = await crypto.subtle.generateKey("Ed25519", true, [
+    "sign",
+    "verify",
+  ]);
+  const pubRaw = new Uint8Array(
+    await crypto.subtle.exportKey("raw", keyPair.publicKey),
+  );
+  const privPkcs8 = new Uint8Array(
+    await crypto.subtle.exportKey("pkcs8", keyPair.privateKey),
+  );
   const newDeviceId = await sha256Hex(pubRaw);
   const publicKey = toBase64Url(pubRaw);
   const privateKey = toBase64Url(privPkcs8);
@@ -225,16 +434,30 @@ async function getOrCreateDeviceIdentity(
   existing.devicePrivateKey = privateKey;
   await saveData(existing);
 
-  return { deviceId: newDeviceId, publicKey, privateKey, cryptoKey: keyPair.privateKey };
+  return {
+    deviceId: newDeviceId,
+    publicKey,
+    privateKey,
+    cryptoKey: keyPair.privateKey,
+  };
 }
 
-async function signDevicePayload(identity: DeviceIdentity, payload: string): Promise<string> {
+async function signDevicePayload(
+  identity: DeviceIdentity,
+  payload: string,
+): Promise<string> {
   const encoded = new TextEncoder().encode(payload);
   let cryptoKey = identity.cryptoKey;
   // If cryptoKey doesn't have sign usage, re-import
   if (!cryptoKey) {
     const privBytes = fromBase64Url(identity.privateKey);
-    cryptoKey = await crypto.subtle.importKey("pkcs8", toArrayBuffer(privBytes), { name: "Ed25519" }, false, ["sign"]);
+    cryptoKey = await crypto.subtle.importKey(
+      "pkcs8",
+      toArrayBuffer(privBytes),
+      { name: "Ed25519" },
+      false,
+      ["sign"],
+    );
   }
   const sig = await crypto.subtle.sign("Ed25519", cryptoKey, encoded);
   return toBase64Url(new Uint8Array(sig));
@@ -325,7 +548,11 @@ interface HistoryMessage {
 
 // ─── Gateway Client ──────────────────────────────────────────────────
 
-type GatewayEventHandler = (event: { event: string; payload: GatewayPayload; seq?: number }) => void;
+type GatewayEventHandler = (event: {
+  event: string;
+  payload: GatewayPayload;
+  seq?: number;
+}) => void;
 type GatewayHelloHandler = (payload: GatewayPayload) => void;
 type GatewayCloseHandler = (info: { code: number; reason: string }) => void;
 type GatewayConnectErrorHandler = (message: string) => void;
@@ -358,16 +585,22 @@ function generateId(): string {
 async function deleteSessionWithFallback(
   gateway: GatewayClient,
   key: string,
-  deleteTranscript = true
+  deleteTranscript = true,
 ): Promise<boolean> {
-  const result = await gateway.request("sessions.delete", { key, deleteTranscript }) as { deleted?: boolean } | null;
+  const result = (await gateway.request("sessions.delete", {
+    key,
+    deleteTranscript,
+  })) as { deleted?: boolean } | null;
   if (result?.deleted) return true;
 
   // Fallback: strip agent:<id>: prefix and retry with raw key
   const match = key.match(/^agent:[^:]+:(.+)$/);
   if (match) {
     const rawKey = match[1];
-    const retry = await gateway.request("sessions.delete", { key: rawKey, deleteTranscript }) as { deleted?: boolean } | null;
+    const retry = (await gateway.request("sessions.delete", {
+      key: rawKey,
+      deleteTranscript,
+    })) as { deleted?: boolean } | null;
     return !!retry?.deleted;
   }
   return false;
@@ -375,7 +608,10 @@ async function deleteSessionWithFallback(
 
 class GatewayClient {
   private ws: WebSocket | null = null;
-  private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private pending = new Map<
+    string,
+    { resolve: (v: unknown) => void; reject: (e: Error) => void }
+  >();
   private closed = false;
   private connectSent = false;
   private connectNonce: string | null = null;
@@ -436,7 +672,9 @@ class GatewayClient {
     // Normalize and validate URL
     const url = normalizeGatewayUrl(this.opts.url);
     if (!url) {
-      console.error("[ObsidianClaw] Invalid gateway URL: must be a valid ws://, wss://, http://, or https:// URL");
+      console.error(
+        "[ObsidianClaw] Invalid gateway URL: must be a valid ws://, wss://, http://, or https:// URL",
+      );
       return;
     }
 
@@ -492,7 +730,15 @@ class GatewayClient {
     const auth = this.opts.token ? { token: this.opts.token } : undefined;
 
     // Build device fingerprint if identity is available
-    let device: { id: string; publicKey: string; signature: string; signedAt: number; nonce?: string } | undefined = undefined;
+    let device:
+      | {
+          id: string;
+          publicKey: string;
+          signature: string;
+          signedAt: number;
+          nonce?: string;
+        }
+      | undefined = undefined;
     const identity = this.opts.deviceIdentity;
     if (identity) {
       try {
@@ -566,7 +812,12 @@ class GatewayClient {
         }
         return;
       }
-      if (msg.event) this.opts.onEvent?.({ event: msg.event, payload: msg.payload ?? {}, seq: msg.seq });
+      if (msg.event)
+        this.opts.onEvent?.({
+          event: msg.event,
+          payload: msg.payload ?? {},
+          seq: msg.seq,
+        });
       return;
     }
 
@@ -610,15 +861,23 @@ class OnboardingModal extends Modal {
   private pairingPollTimer: number | null = null;
 
   // Setup state for fresh install path
-  private setupKeys = { claude1: '', claude2: '', googleai: '', brave: '', elevenlabs: '' };
-  private setupBots: { name: string; model: string }[] = [{ name: 'Assistant', model: 'anthropic/claude-sonnet-4-6' }];
+  private setupKeys = {
+    claude1: "",
+    claude2: "",
+    googleai: "",
+    brave: "",
+    elevenlabs: "",
+  };
+  private setupBots: { name: string; model: string }[] = [
+    { name: "Assistant", model: "anthropic/claude-sonnet-4-6" },
+  ];
 
   private static MODELS = [
-    { id: 'anthropic/claude-opus-4-6', label: 'Claude Opus 4' },
-    { id: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4' },
-    { id: 'anthropic/claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
-    { id: 'google/gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-    { id: 'google/gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+    { id: "anthropic/claude-opus-4-6", label: "Claude Opus 4" },
+    { id: "anthropic/claude-sonnet-4-6", label: "Claude Sonnet 4" },
+    { id: "anthropic/claude-sonnet-4-5", label: "Claude Sonnet 4.5" },
+    { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { id: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash" },
   ];
 
   constructor(app: App, plugin: OpenClawPlugin) {
@@ -632,7 +891,10 @@ class OnboardingModal extends Modal {
   }
 
   onClose(): void {
-    if (this.pairingPollTimer) { window.clearInterval(this.pairingPollTimer); this.pairingPollTimer = null; }
+    if (this.pairingPollTimer) {
+      window.clearInterval(this.pairingPollTimer);
+      this.pairingPollTimer = null;
+    }
   }
 
   /** Safely render simple HTML (text, <a>, <code>, <strong>) into an element using DOM API */
@@ -641,14 +903,20 @@ class OnboardingModal extends Modal {
     const parser = new DOMParser();
     const doc = parser.parseFromString(`<span>${html}</span>`, "text/html");
     const source = doc.body.firstElementChild;
-    if (!source) { el.setText(html); return; }
+    if (!source) {
+      el.setText(html);
+      return;
+    }
     for (const node of Array.from(source.childNodes)) {
       if (node.nodeType === Node.TEXT_NODE) {
         el.appendText(node.textContent ?? "");
       } else if (node.instanceOf(HTMLElement)) {
         const tag = node.tagName.toLowerCase();
         if (tag === "a") {
-          el.createEl("a", { text: node.textContent ?? "", href: node.getAttribute("href") ?? "" });
+          el.createEl("a", {
+            text: node.textContent ?? "",
+            href: node.getAttribute("href") ?? "",
+          });
         } else if (tag === "code") {
           el.createEl("code", { text: node.textContent ?? "" });
         } else if (tag === "strong") {
@@ -666,16 +934,23 @@ class OnboardingModal extends Modal {
     this.statusEl = null;
 
     // Step indicator — adapts to path
-    const stepLabels = this.path === "fresh"
-      ? ["Start", "Keys", "Bots", "Install", "Connect", "Pair", "Done"]
-      : this.path === "existing"
-        ? ["Start", "Connect", "Pair", "Done"]
-        : ["Start"];
+    const stepLabels =
+      this.path === "fresh"
+        ? ["Start", "Keys", "Bots", "Install", "Connect", "Pair", "Done"]
+        : this.path === "existing"
+          ? ["Start", "Connect", "Pair", "Done"]
+          : ["Start"];
     const indicator = contentEl.createDiv("openclaw-onboard-steps");
     stepLabels.forEach((_label, i) => {
-      const dot = indicator.createSpan("openclaw-step-dot" + (i === this.step ? " active" : i < this.step ? " done" : ""));
+      const dot = indicator.createSpan(
+        "openclaw-step-dot" +
+          (i === this.step ? " active" : i < this.step ? " done" : ""),
+      );
       dot.textContent = i < this.step ? "✓" : String(i + 1);
-      if (i < stepLabels.length - 1) indicator.createSpan("openclaw-step-line" + (i < this.step ? " done" : ""));
+      if (i < stepLabels.length - 1)
+        indicator.createSpan(
+          "openclaw-step-line" + (i < this.step ? " done" : ""),
+        );
     });
 
     // Route to correct step renderer
@@ -706,13 +981,29 @@ class OnboardingModal extends Modal {
 
     this.renderPatchNotice(el);
 
-    const btnRow = el.createDiv("openclaw-onboard-buttons openclaw-onboard-buttons-vertical");
+    const btnRow = el.createDiv(
+      "openclaw-onboard-buttons openclaw-onboard-buttons-vertical",
+    );
 
-    const freshBtn = btnRow.createEl("button", { text: "I need to install OpenClaw", cls: "mod-cta openclaw-full-width" });
-    freshBtn.addEventListener("click", () => { this.path = "fresh"; this.step = 1; this.renderStep(); });
+    const freshBtn = btnRow.createEl("button", {
+      text: "I need to install OpenClaw",
+      cls: "mod-cta openclaw-full-width",
+    });
+    freshBtn.addEventListener("click", () => {
+      this.path = "fresh";
+      this.step = 1;
+      this.renderStep();
+    });
 
-    const existBtn = btnRow.createEl("button", { text: "OpenClaw is already running", cls: "openclaw-full-width" });
-    existBtn.addEventListener("click", () => { this.path = "existing"; this.step = 1; this.renderStep(); });
+    const existBtn = btnRow.createEl("button", {
+      text: "OpenClaw is already running",
+      cls: "openclaw-full-width",
+    });
+    existBtn.addEventListener("click", () => {
+      this.path = "existing";
+      this.step = 1;
+      this.renderStep();
+    });
   }
 
   // ─── Required patch notice (shown on welcome + on connect failure) ─
@@ -721,19 +1012,26 @@ class OnboardingModal extends Modal {
     const box = el.createDiv("openclaw-onboard-warn");
     const head = box.createDiv("openclaw-onboard-warn-head");
     head.createSpan({ text: "⚠️ ", cls: "openclaw-onboard-warn-icon" });
-    head.createEl("strong", { text: "One-time patch required on your OpenClaw gateway" });
+    head.createEl("strong", {
+      text: "One-time patch required on your OpenClaw gateway",
+    });
 
     const body = box.createDiv("openclaw-onboard-warn-body");
     body.appendText("Obsidian loads from ");
     body.createEl("code", { text: "app://obsidian.md" });
-    body.appendText(", which vanilla OpenClaw rejects. A small idempotent script adds the needed origin fallback. ");
+    body.appendText(
+      ", which vanilla OpenClaw rejects. A small idempotent script adds the needed origin fallback. ",
+    );
     body.createEl("strong", { text: "Re-run after every " });
     body.createEl("code", { text: "openclaw update" });
     body.createEl("strong", { text: "." });
 
-    const details = box.createEl("details", { cls: "openclaw-onboard-warn-details" });
+    const details = box.createEl("details", {
+      cls: "openclaw-onboard-warn-details",
+    });
     details.createEl("summary", { text: "Show the command" });
-    const cmd = "curl -fsSL https://raw.githubusercontent.com/oscarhenrycollins/obsidianclaw/main/scripts/patch-openclaw.sh | sudo bash";
+    const cmd =
+      "curl -fsSL https://raw.githubusercontent.com/oscarhenrycollins/obsidianclaw/main/scripts/patch-openclaw.sh | sudo bash";
     this.makeCopyBox(details, cmd);
     const linkLine = details.createDiv("openclaw-onboard-hint");
     linkLine.appendText("Review the script first: ");
@@ -752,18 +1050,53 @@ class OnboardingModal extends Modal {
       cls: "openclaw-onboard-desc",
     });
 
-    const fields: { key: keyof typeof this.setupKeys; label: string; required?: boolean; placeholder: string; help: string }[] = [
-      { key: "claude1", label: "Claude token", required: true, placeholder: "sk-ant-...", help: "From <a href='https://console.anthropic.com/settings/keys'>console.anthropic.com</a> or Claude Max OAuth" },
-      { key: "claude2", label: "Claude token #2 (parallel requests)", placeholder: "sk-ant-...", help: "Optional — enables concurrent requests" },
-      { key: "googleai", label: "Google AI API key", placeholder: "AIza...", help: "Free at <a href='https://aistudio.google.com/apikey'>aistudio.google.com</a> — enables Gemini models" },
-      { key: "brave", label: "Brave Search API key", placeholder: "BSA...", help: "Free at <a href='https://brave.com/search/api/'>brave.com/search/api</a> — web search" },
-      { key: "elevenlabs", label: "ElevenLabs API key", placeholder: "sk_...", help: "Free at <a href='https://elevenlabs.io'>elevenlabs.io</a> — voice/TTS" },
+    const fields: {
+      key: keyof typeof this.setupKeys;
+      label: string;
+      required?: boolean;
+      placeholder: string;
+      help: string;
+    }[] = [
+      {
+        key: "claude1",
+        label: "Claude token",
+        required: true,
+        placeholder: "sk-ant-...",
+        help: "From <a href='https://console.anthropic.com/settings/keys'>console.anthropic.com</a> or Claude Max OAuth",
+      },
+      {
+        key: "claude2",
+        label: "Claude token #2 (parallel requests)",
+        placeholder: "sk-ant-...",
+        help: "Optional — enables concurrent requests",
+      },
+      {
+        key: "googleai",
+        label: "Google AI API key",
+        placeholder: "AIza...",
+        help: "Free at <a href='https://aistudio.google.com/apikey'>aistudio.google.com</a> — enables Gemini models",
+      },
+      {
+        key: "brave",
+        label: "Brave Search API key",
+        placeholder: "BSA...",
+        help: "Free at <a href='https://brave.com/search/api/'>brave.com/search/api</a> — web search",
+      },
+      {
+        key: "elevenlabs",
+        label: "ElevenLabs API key",
+        placeholder: "sk_...",
+        help: "Free at <a href='https://elevenlabs.io'>elevenlabs.io</a> — voice/TTS",
+      },
     ];
 
     for (const f of fields) {
       const group = el.createDiv("openclaw-onboard-field");
       const label = group.createEl("label", { text: f.label });
-      if (f.required) { const req = label.createSpan({ cls: "oc-req-label" }); req.textContent = " (required)"; }
+      if (f.required) {
+        const req = label.createSpan({ cls: "oc-req-label" });
+        req.textContent = " (required)";
+      }
       const fKey = f.key as keyof typeof this.setupKeys;
       const input = group.createEl("input", {
         type: "password",
@@ -771,22 +1104,39 @@ class OnboardingModal extends Modal {
         placeholder: f.placeholder,
         cls: "openclaw-onboard-input",
       });
-      input.addEventListener("input", () => { this.setupKeys[fKey] = input.value.trim(); });
+      input.addEventListener("input", () => {
+        this.setupKeys[fKey] = input.value.trim();
+      });
       const help = group.createDiv("openclaw-onboard-hint");
       this.setRichText(help, f.help);
     }
 
     const note = el.createDiv("openclaw-onboard-info");
-    note.setText("🔒 Keys stay on your device. The install command runs entirely on your server.");
+    note.setText(
+      "🔒 Keys stay on your device. The install command runs entirely on your server.",
+    );
 
     this.statusEl = el.createDiv("openclaw-onboard-status");
 
     const btnRow = el.createDiv("openclaw-onboard-buttons");
-    btnRow.createEl("button", { text: "← back" }).addEventListener("click", () => { this.step = 0; this.path = null; this.renderStep(); });
-    const nextBtn = btnRow.createEl("button", { text: "Next →", cls: "mod-cta" });
+    btnRow
+      .createEl("button", { text: "← back" })
+      .addEventListener("click", () => {
+        this.step = 0;
+        this.path = null;
+        this.renderStep();
+      });
+    const nextBtn = btnRow.createEl("button", {
+      text: "Next →",
+      cls: "mod-cta",
+    });
     nextBtn.addEventListener("click", () => {
-      if (!this.setupKeys.claude1) { this.showStatus("Claude token is required", "error"); return; }
-      this.step = 2; this.renderStep();
+      if (!this.setupKeys.claude1) {
+        this.showStatus("Claude token is required", "error");
+        return;
+      }
+      this.step = 2;
+      this.renderStep();
     });
   }
 
@@ -803,24 +1153,44 @@ class OnboardingModal extends Modal {
     this.setupBots.forEach((bot, i) => {
       const card = listEl.createDiv("openclaw-onboard-bot-card");
       const row = card.createDiv("openclaw-onboard-bot-row");
-      const nameInput = row.createEl("input", { type: "text", value: bot.name, placeholder: "Bot name", cls: "openclaw-onboard-input oc-name-input" });
-      nameInput.addEventListener("input", () => { bot.name = nameInput.value; });
+      const nameInput = row.createEl("input", {
+        type: "text",
+        value: bot.name,
+        placeholder: "Bot name",
+        cls: "openclaw-onboard-input oc-name-input",
+      });
+      nameInput.addEventListener("input", () => {
+        bot.name = nameInput.value;
+      });
 
-      const select = row.createEl("select", { cls: "openclaw-onboard-input oc-select-inline" });
+      const select = row.createEl("select", {
+        cls: "openclaw-onboard-input oc-select-inline",
+      });
       for (const m of OnboardingModal.MODELS) {
         const opt = select.createEl("option", { text: m.label, value: m.id });
         if (m.id === bot.model) opt.selected = true;
       }
-      select.addEventListener("change", () => { bot.model = select.value; });
+      select.addEventListener("change", () => {
+        bot.model = select.value;
+      });
 
       if (this.setupBots.length > 1) {
         const removeBtn = row.createSpan({ text: "×", cls: "oc-remove-btn" });
-        removeBtn.addEventListener("click", () => { this.setupBots.splice(i, 1); this.renderStep(); });
+        removeBtn.addEventListener("click", () => {
+          this.setupBots.splice(i, 1);
+          this.renderStep();
+        });
       }
     });
 
-    const addBtn = el.createEl("button", { text: "+ add another bot", cls: "oc-add-bot-btn" });
-    addBtn.addEventListener("click", () => { this.setupBots.push({ name: '', model: 'anthropic/claude-sonnet-4-6' }); this.renderStep(); });
+    const addBtn = el.createEl("button", {
+      text: "+ add another bot",
+      cls: "oc-add-bot-btn",
+    });
+    addBtn.addEventListener("click", () => {
+      this.setupBots.push({ name: "", model: "anthropic/claude-sonnet-4-6" });
+      this.renderStep();
+    });
 
     const note = el.createDiv("openclaw-onboard-hint oc-margin-top");
     note.createSpan({ text: "Each bot gets a folder like " });
@@ -830,9 +1200,20 @@ class OnboardingModal extends Modal {
     this.statusEl = el.createDiv("openclaw-onboard-status");
 
     const btnRow = el.createDiv("openclaw-onboard-buttons");
-    btnRow.createEl("button", { text: "← back" }).addEventListener("click", () => { this.step = 1; this.renderStep(); });
-    const nextBtn = btnRow.createEl("button", { text: "Generate install command →", cls: "mod-cta" });
-    nextBtn.addEventListener("click", () => { this.step = 3; this.renderStep(); });
+    btnRow
+      .createEl("button", { text: "← back" })
+      .addEventListener("click", () => {
+        this.step = 1;
+        this.renderStep();
+      });
+    const nextBtn = btnRow.createEl("button", {
+      text: "Generate install command →",
+      cls: "mod-cta",
+    });
+    nextBtn.addEventListener("click", () => {
+      this.step = 3;
+      this.renderStep();
+    });
   }
 
   // ─── Fresh path: Step 3 — Install command ────────────────────────
@@ -846,55 +1227,123 @@ class OnboardingModal extends Modal {
 
     const config = this.generateConfig();
     const configJson = JSON.stringify(config, null, 2);
-    const configB64 = btoa(Array.from(new TextEncoder().encode(configJson), b => String.fromCharCode(b)).join(''));
+    const configB64 = btoa(
+      Array.from(new TextEncoder().encode(configJson), (b) =>
+        String.fromCharCode(b),
+      ).join(""),
+    );
     const installCmd = `curl -fsSL https://openclaw.ai/install.sh | bash && echo '${configB64}' | base64 -d > ~/.openclaw/openclaw.json && openclaw gateway restart`;
 
     this.makeCopyBox(el, installCmd);
 
-    el.createEl("p", { text: "This installs OpenClaw, writes your config with all API keys and bot settings, configures Tailscale Serve, and starts the gateway.", cls: "openclaw-onboard-hint" });
+    el.createEl("p", {
+      text: "This installs OpenClaw, writes your config with all API keys and bot settings, configures Tailscale Serve, and starts the gateway.",
+      cls: "openclaw-onboard-hint",
+    });
 
     // Expandable config preview
     const details = el.createEl("details", { cls: "oc-margin-top" });
-    details.createEl("summary", { text: "Preview config", cls: "oc-details-summary" });
+    details.createEl("summary", {
+      text: "Preview config",
+      cls: "oc-details-summary",
+    });
     const pre = details.createEl("pre", { cls: "oc-install-pre" });
     pre.textContent = JSON.stringify(config, null, 2);
 
-    el.createEl("p", { text: "After it finishes, install Tailscale if you haven't:", cls: "openclaw-onboard-desc" });
-    this.makeCopyBox(el, "# Mac:\nbrew install --cask tailscale\n\n# Linux:\ncurl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up");
+    el.createEl("p", {
+      text: "After it finishes, install Tailscale if you haven't:",
+      cls: "openclaw-onboard-desc",
+    });
+    this.makeCopyBox(
+      el,
+      "# Mac:\nbrew install --cask tailscale\n\n# Linux:\ncurl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up",
+    );
 
-    el.createEl("p", { text: "Then install Tailscale on this device too, using the same account.", cls: "openclaw-onboard-hint" });
+    el.createEl("p", {
+      text: "Then install Tailscale on this device too, using the same account.",
+      cls: "openclaw-onboard-hint",
+    });
 
     this.statusEl = el.createDiv("openclaw-onboard-status");
 
     const btnRow = el.createDiv("openclaw-onboard-buttons");
-    btnRow.createEl("button", { text: "← back" }).addEventListener("click", () => { this.step = 2; this.renderStep(); });
-    const nextBtn = btnRow.createEl("button", { text: "OpenClaw is running →", cls: "mod-cta" });
-    nextBtn.addEventListener("click", () => { this.step = 4; this.renderStep(); });
+    btnRow
+      .createEl("button", { text: "← back" })
+      .addEventListener("click", () => {
+        this.step = 2;
+        this.renderStep();
+      });
+    const nextBtn = btnRow.createEl("button", {
+      text: "OpenClaw is running →",
+      cls: "mod-cta",
+    });
+    nextBtn.addEventListener("click", () => {
+      this.step = 4;
+      this.renderStep();
+    });
   }
 
   private generateConfig(): Record<string, unknown> {
-    const auth: Record<string, unknown> = { profiles: {} as Record<string, unknown> };
-    const agents: Record<string, unknown> = { defaults: { model: { primary: this.setupBots[0]?.model || 'anthropic/claude-sonnet-4-6' } } };
+    const auth: Record<string, unknown> = {
+      profiles: {} as Record<string, unknown>,
+    };
+    const agents: Record<string, unknown> = {
+      defaults: {
+        model: {
+          primary: this.setupBots[0]?.model || "anthropic/claude-sonnet-4-6",
+        },
+      },
+    };
     const config: Record<string, unknown> = {
       auth,
       agents,
-      gateway: { port: 18789, bind: 'loopback', tailscale: { mode: 'serve' }, auth: { mode: 'token', allowTailscale: true } },
+      gateway: {
+        port: 18789,
+        bind: "loopback",
+        tailscale: { mode: "serve" },
+        auth: { mode: "token", allowTailscale: true },
+      },
     };
     const profiles = auth.profiles as Record<string, unknown>;
-    if (this.setupKeys.claude1) profiles['anthropic:default'] = { provider: 'anthropic', mode: 'token' };
-    if (this.setupKeys.claude2) profiles['anthropic:secondary'] = { provider: 'anthropic', mode: 'token' };
-    if (this.setupKeys.googleai) profiles['google:default'] = { provider: 'google', mode: 'api_key' };
-    if (this.setupKeys.brave) config.tools = { web: { search: { apiKey: this.setupKeys.brave } } };
-    if (this.setupKeys.elevenlabs) config.messages = { tts: { provider: 'elevenlabs', elevenlabs: { apiKey: this.setupKeys.elevenlabs } } };
+    if (this.setupKeys.claude1)
+      profiles["anthropic:default"] = { provider: "anthropic", mode: "token" };
+    if (this.setupKeys.claude2)
+      profiles["anthropic:secondary"] = {
+        provider: "anthropic",
+        mode: "token",
+      };
+    if (this.setupKeys.googleai)
+      profiles["google:default"] = { provider: "google", mode: "api_key" };
+    if (this.setupKeys.brave)
+      config.tools = { web: { search: { apiKey: this.setupKeys.brave } } };
+    if (this.setupKeys.elevenlabs)
+      config.messages = {
+        tts: {
+          provider: "elevenlabs",
+          elevenlabs: { apiKey: this.setupKeys.elevenlabs },
+        },
+      };
     if (this.setupBots.length > 1) {
       agents.list = this.setupBots.map((bot, i) => {
-        const id = i === 0 ? 'main' : (bot.name.toLowerCase().replace(/[^a-z0-9]/g, '-') || `bot-${i}`);
-        const folder = 'AGENT-' + (bot.name || 'BOT').toUpperCase().replace(/[^A-Z0-9]/g, '-');
-        return { id, name: bot.name || `Bot ${i + 1}`, workspace: `~/.openclaw/workspace/${folder}` };
+        const id =
+          i === 0
+            ? "main"
+            : bot.name.toLowerCase().replace(/[^a-z0-9]/g, "-") || `bot-${i}`;
+        const folder =
+          "AGENT-" +
+          (bot.name || "BOT").toUpperCase().replace(/[^A-Z0-9]/g, "-");
+        return {
+          id,
+          name: bot.name || `Bot ${i + 1}`,
+          workspace: `~/.openclaw/workspace/${folder}`,
+        };
       });
     } else if (this.setupBots[0]?.name) {
-      const folder = 'AGENT-' + this.setupBots[0].name.toUpperCase().replace(/[^A-Z0-9]/g, '-');
-      (agents.defaults as Record<string, unknown>).workspace = `~/.openclaw/workspace/${folder}`;
+      const folder =
+        "AGENT-" +
+        this.setupBots[0].name.toUpperCase().replace(/[^A-Z0-9]/g, "-");
+      (agents.defaults as Record<string, unknown>).workspace =
+        `~/.openclaw/workspace/${folder}`;
     }
     return config;
   }
@@ -915,23 +1364,46 @@ class OnboardingModal extends Modal {
     s1.appendText("Install on your ");
     s1.createEl("strong", { text: "gateway machine" });
     s1.appendText(": ");
-    s1.createEl("a", { text: "tailscale.com/download", href: "https://tailscale.com/download" });
+    s1.createEl("a", {
+      text: "tailscale.com/download",
+      href: "https://tailscale.com/download",
+    });
     const s2 = steps.createEl("li");
     s2.appendText("Install on ");
     s2.createEl("strong", { text: "this device" });
     s2.appendText(": ");
-    s2.createEl("a", { text: "tailscale.com/download", href: "https://tailscale.com/download" });
-    steps.createEl("li", { text: "Sign in to the same Tailscale account on both." });
+    s2.createEl("a", {
+      text: "tailscale.com/download",
+      href: "https://tailscale.com/download",
+    });
+    steps.createEl("li", {
+      text: "Sign in to the same Tailscale account on both.",
+    });
 
-    el.createEl("p", { text: "Verify by running this on the gateway:", cls: "openclaw-onboard-hint" });
+    el.createEl("p", {
+      text: "Verify by running this on the gateway:",
+      cls: "openclaw-onboard-hint",
+    });
     this.makeCopyBox(el, "tailscale status");
 
     this.statusEl = el.createDiv("openclaw-onboard-status");
 
     const btnRow = el.createDiv("openclaw-onboard-buttons");
-    btnRow.createEl("button", { text: "← back" }).addEventListener("click", () => { this.step = 0; this.path = null; this.renderStep(); });
-    const nextBtn = btnRow.createEl("button", { text: "Both on Tailscale →", cls: "mod-cta" });
-    nextBtn.addEventListener("click", () => { this.step = 2; this.renderStep(); });
+    btnRow
+      .createEl("button", { text: "← back" })
+      .addEventListener("click", () => {
+        this.step = 0;
+        this.path = null;
+        this.renderStep();
+      });
+    const nextBtn = btnRow.createEl("button", {
+      text: "Both on Tailscale →",
+      cls: "mod-cta",
+    });
+    nextBtn.addEventListener("click", () => {
+      this.step = 2;
+      this.renderStep();
+    });
   }
 
   // ─── Existing path: Step 2 — Gateway (Tailscale Serve) ───────────
@@ -944,7 +1416,10 @@ class OnboardingModal extends Modal {
     });
 
     el.createEl("strong", { text: "1. Configure OpenClaw" });
-    this.makeCopyBox(el, "openclaw config set gateway.bind loopback\nopenclaw config set gateway.tailscale.mode serve\nopenclaw gateway restart");
+    this.makeCopyBox(
+      el,
+      "openclaw config set gateway.bind loopback\nopenclaw config set gateway.tailscale.mode serve\nopenclaw gateway restart",
+    );
 
     el.createEl("strong", { text: "2. Start Tailscale serve" });
     this.makeCopyBox(el, "tailscale serve --bg http://127.0.0.1:18789");
@@ -962,14 +1437,28 @@ class OnboardingModal extends Modal {
     trouble.appendText("💡 ");
     trouble.createEl("strong", { text: "Not working?" });
     trouble.appendText(" Run: ");
-    this.makeCopyBox(trouble, "openclaw doctor --fix && openclaw gateway restart");
+    this.makeCopyBox(
+      trouble,
+      "openclaw doctor --fix && openclaw gateway restart",
+    );
 
     this.statusEl = el.createDiv("openclaw-onboard-status");
 
     const btnRow = el.createDiv("openclaw-onboard-buttons");
-    btnRow.createEl("button", { text: "← back" }).addEventListener("click", () => { this.step = 1; this.renderStep(); });
-    const nextBtn = btnRow.createEl("button", { text: "I have the URL and token →", cls: "mod-cta" });
-    nextBtn.addEventListener("click", () => { this.step = 3; this.renderStep(); });
+    btnRow
+      .createEl("button", { text: "← back" })
+      .addEventListener("click", () => {
+        this.step = 1;
+        this.renderStep();
+      });
+    const nextBtn = btnRow.createEl("button", {
+      text: "I have the URL and token →",
+      cls: "mod-cta",
+    });
+    nextBtn.addEventListener("click", () => {
+      this.step = 3;
+      this.renderStep();
+    });
   }
 
   // ─── Step 3: Connect ─────────────────────────────────────────────
@@ -1016,39 +1505,57 @@ class OnboardingModal extends Modal {
     troubleshoot.addClass("oc-hidden");
     troubleshoot.createEl("h3", { text: "Troubleshooting" });
 
-    const checks = troubleshoot.createEl("ol", { cls: "openclaw-onboard-list" });
+    const checks = troubleshoot.createEl("ol", {
+      cls: "openclaw-onboard-list",
+    });
 
     const li1 = checks.createEl("li");
     li1.createEl("strong", { text: "Is Tailscale connected on this device?" });
-    li1.appendText(" Check the Tailscale icon in your system tray / menu bar. If it's off, turn it on.");
+    li1.appendText(
+      " Check the Tailscale icon in your system tray / menu bar. If it's off, turn it on.",
+    );
 
     const li2 = checks.createEl("li");
-    li2.createEl("strong", { text: "DNS not resolving? (most common on macOS)" });
+    li2.createEl("strong", {
+      text: "DNS not resolving? (most common on macOS)",
+    });
     li2.appendText(" Open the ");
     li2.createEl("strong", { text: "Tailscale app" });
     li2.appendText(" from your menu bar, toggle it ");
     li2.createEl("strong", { text: "OFF" });
     li2.appendText(", wait 5 seconds, toggle it ");
     li2.createEl("strong", { text: "ON" });
-    li2.appendText(". This resets MagicDNS, which macOS sometimes loses track of.");
+    li2.appendText(
+      ". This resets MagicDNS, which macOS sometimes loses track of.",
+    );
 
     const li3 = checks.createEl("li");
     li3.setText("Is the gateway running? On the gateway machine, run:");
-    this.makeCopyBox(troubleshoot, "openclaw doctor --fix && openclaw gateway restart");
+    this.makeCopyBox(
+      troubleshoot,
+      "openclaw doctor --fix && openclaw gateway restart",
+    );
 
     const li4 = checks.createEl("li");
     li4.setText("Is Tailscale Serve active? On the gateway machine, run:");
     this.makeCopyBox(troubleshoot, "tailscale serve status");
     const tsHint = troubleshoot.createDiv("openclaw-onboard-hint");
     tsHint.setText("If Tailscale Serve shows nothing, set it up:");
-    this.makeCopyBox(troubleshoot, "tailscale serve --bg http://127.0.0.1:18789");
+    this.makeCopyBox(
+      troubleshoot,
+      "tailscale serve --bg http://127.0.0.1:18789",
+    );
 
     const li5 = checks.createEl("li");
     li5.createEl("strong", { text: "Gateway config broken?" });
     li5.appendText(" If ");
     li5.createEl("code", { text: "openclaw doctor" });
-    li5.appendText(' shows "Invalid config" errors, your gateway config file may have been corrupted. To reset to the recommended setup, run these on the gateway machine:');
-    this.makeCopyBox(troubleshoot, `cat ~/.openclaw/openclaw.json | python3 -c "
+    li5.appendText(
+      ' shows "Invalid config" errors, your gateway config file may have been corrupted. To reset to the recommended setup, run these on the gateway machine:',
+    );
+    this.makeCopyBox(
+      troubleshoot,
+      `cat ~/.openclaw/openclaw.json | python3 -c "
 import json, sys
 c = json.load(sys.stdin)
 c.setdefault('gateway', {})['bind'] = 'loopback'
@@ -1056,67 +1563,113 @@ c['gateway'].setdefault('tailscale', {})['mode'] = 'serve'
 c['gateway']['tailscale']['resetOnExit'] = False
 json.dump(c, open(sys.argv[1], 'w'), indent=2)
 print('Config fixed: bind=loopback, tailscale.mode=serve')
-" ~/.openclaw/openclaw.json`);
+" ~/.openclaw/openclaw.json`,
+    );
     const li5hint = troubleshoot.createDiv("openclaw-onboard-hint");
     li5hint.setText("Then restart the gateway and re-enable Tailscale Serve:");
-    this.makeCopyBox(troubleshoot, "openclaw gateway restart && tailscale serve --bg http://127.0.0.1:18789");
+    this.makeCopyBox(
+      troubleshoot,
+      "openclaw gateway restart && tailscale serve --bg http://127.0.0.1:18789",
+    );
 
     const li6 = checks.createEl("li");
     li6.createEl("strong", { text: "Still stuck?" });
-    li6.appendText(" Try restarting the Tailscale app entirely, or reboot this device. macOS DNS can get stuck and needs a fresh start.");
+    li6.appendText(
+      " Try restarting the Tailscale app entirely, or reboot this device. macOS DNS can get stuck and needs a fresh start.",
+    );
 
     const btnRow = el.createDiv("openclaw-onboard-buttons");
-    btnRow.createEl("button", { text: "← back" }).addEventListener("click", () => {
-      if (this.path === "existing") { this.step = 0; this.path = null; }
-      else { this.step = this.step - 1; }
-      this.renderStep();
-    });
-
-    const testBtn = btnRow.createEl("button", { text: "Test connection", cls: "mod-cta" });
-    testBtn.addEventListener("click", () => void (async () => {
-      const url = urlInput.value.trim();
-      const token = tokenInput.value.trim();
-
-      if (!url) { this.showStatus("Paste your gateway URL from the previous step", "error"); return; }
-      const normalizedUrl = normalizeGatewayUrl(url);
-      if (!normalizedUrl) {
-        this.showStatus("That doesn't look right. Paste the URL from `tailscale serve status` (e.g. https://your-machine.tail1234.ts.net)", "error"); return;
-      }
-      if (!token) { this.showStatus("Paste your auth token", "error"); return; }
-
-      testBtn.disabled = true;
-      testBtn.textContent = "Connecting...";
-      troubleshoot.addClass("oc-hidden");
-      this.showStatus("Testing connection...", "info");
-
-      // Always reset to "main" session to ensure clean connection
-      urlInput.value = normalizedUrl;
-      this.plugin.settings.gatewayUrl = normalizedUrl;
-      this.plugin.settings.token = token;
-      this.plugin.settings.sessionKey = "main";
-      await this.plugin.saveSettings();
-
-      const ok = await new Promise<boolean>((resolve) => {
-        const timeout = window.setTimeout(() => { tc.stop(); resolve(false); }, 8000);
-        const tc = new GatewayClient({
-          url: normalizedUrl, token,
-          onHello: () => { window.clearTimeout(timeout); tc.stop(); resolve(true); },
-          onClose: () => {},
-        });
-        tc.start();
+    btnRow
+      .createEl("button", { text: "← back" })
+      .addEventListener("click", () => {
+        if (this.path === "existing") {
+          this.step = 0;
+          this.path = null;
+        } else {
+          this.step = this.step - 1;
+        }
+        this.renderStep();
       });
 
-      testBtn.disabled = false;
-      testBtn.textContent = "Test connection";
+    const testBtn = btnRow.createEl("button", {
+      text: "Test connection",
+      cls: "mod-cta",
+    });
+    testBtn.addEventListener(
+      "click",
+      () =>
+        void (async () => {
+          const url = urlInput.value.trim();
+          const token = tokenInput.value.trim();
 
-      if (ok) {
-        this.showStatus("✓ Connected!", "success");
-        window.setTimeout(() => { this.step = this.step + 1; this.renderStep(); }, 800);
-      } else {
-        this.showStatus("Could not connect. Check the troubleshooting steps below.", "error");
-        troubleshoot.removeClass("oc-hidden");
-      }
-    })());
+          if (!url) {
+            this.showStatus(
+              "Paste your gateway URL from the previous step",
+              "error",
+            );
+            return;
+          }
+          const normalizedUrl = normalizeGatewayUrl(url);
+          if (!normalizedUrl) {
+            this.showStatus(
+              "That doesn't look right. Paste the URL from `tailscale serve status` (e.g. https://your-machine.tail1234.ts.net)",
+              "error",
+            );
+            return;
+          }
+          if (!token) {
+            this.showStatus("Paste your auth token", "error");
+            return;
+          }
+
+          testBtn.disabled = true;
+          testBtn.textContent = "Connecting...";
+          troubleshoot.addClass("oc-hidden");
+          this.showStatus("Testing connection...", "info");
+
+          // Always reset to "main" session to ensure clean connection
+          urlInput.value = normalizedUrl;
+          this.plugin.settings.gatewayUrl = normalizedUrl;
+          this.plugin.settings.token = token;
+          this.plugin.settings.sessionKey = "main";
+          await this.plugin.saveSettings();
+
+          const ok = await new Promise<boolean>((resolve) => {
+            const timeout = window.setTimeout(() => {
+              tc.stop();
+              resolve(false);
+            }, 8000);
+            const tc = new GatewayClient({
+              url: normalizedUrl,
+              token,
+              onHello: () => {
+                window.clearTimeout(timeout);
+                tc.stop();
+                resolve(true);
+              },
+              onClose: () => {},
+            });
+            tc.start();
+          });
+
+          testBtn.disabled = false;
+          testBtn.textContent = "Test connection";
+
+          if (ok) {
+            this.showStatus("✓ Connected!", "success");
+            window.setTimeout(() => {
+              this.step = this.step + 1;
+              this.renderStep();
+            }, 800);
+          } else {
+            this.showStatus(
+              "Could not connect. Check the troubleshooting steps below.",
+              "error",
+            );
+            troubleshoot.removeClass("oc-hidden");
+          }
+        })(),
+    );
   }
 
   private makeCopyBox(parent: HTMLElement, command: string): HTMLElement {
@@ -1127,7 +1680,7 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
     box.addEventListener("click", () => {
       void navigator.clipboard.writeText(command).then(() => {
         btn.textContent = "✓";
-        window.setTimeout(() => btn.textContent = "Copy", 1500);
+        window.setTimeout(() => (btn.textContent = "Copy"), 1500);
       });
     });
     return box;
@@ -1142,14 +1695,17 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
       cls: "openclaw-onboard-desc",
     });
 
-    const hasKeys = this.plugin.settings.deviceId && this.plugin.settings.devicePublicKey;
+    const hasKeys =
+      this.plugin.settings.deviceId && this.plugin.settings.devicePublicKey;
 
     if (hasKeys) {
       const info = el.createDiv("openclaw-onboard-info");
       info.createEl("p", { text: "This device already has a keypair." });
       const deviceP = info.createEl("p");
       deviceP.appendText("Device ID: ");
-      deviceP.createEl("code", { text: (this.plugin.settings.deviceId?.slice(0, 12) ?? "") + "..." });
+      deviceP.createEl("code", {
+        text: (this.plugin.settings.deviceId?.slice(0, 12) ?? "") + "...",
+      });
     }
 
     this.statusEl = el.createDiv("openclaw-onboard-status");
@@ -1158,97 +1714,176 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
     const approvalInfo = el.createDiv("openclaw-onboard-numbered");
 
     const opt1 = approvalInfo.createDiv("openclaw-onboard-numbered-item");
-    opt1.createEl("p", { text: "Option 1 — Run on the server:", cls: "openclaw-onboard-hint" });
+    opt1.createEl("p", {
+      text: "Option 1 — Run on the server:",
+      cls: "openclaw-onboard-hint",
+    });
     this.makeCopyBox(opt1, "openclaw devices approve --latest");
 
     const opt2 = approvalInfo.createDiv("openclaw-onboard-numbered-item");
-    opt2.createEl("p", { text: "Option 2 — Ask your bot:", cls: "openclaw-onboard-hint" });
-    opt2.createEl("p", { text: "If you already have a channel connected (Telegram, Discord, etc.), just tell your bot: \"approve the pending device\"", cls: "openclaw-onboard-hint" });
+    opt2.createEl("p", {
+      text: "Option 2 — Ask your bot:",
+      cls: "openclaw-onboard-hint",
+    });
+    opt2.createEl("p", {
+      text: 'If you already have a channel connected (Telegram, Discord, etc.), just tell your bot: "approve the pending device"',
+      cls: "openclaw-onboard-hint",
+    });
 
-    const afterApproval = approvalInfo.createDiv("openclaw-onboard-numbered-item");
-    afterApproval.createEl("p", { text: "After approval:", cls: "openclaw-onboard-hint" });
-    afterApproval.createEl("p", { text: "Come back here and click “Check pairing status”. If it still says disconnected, close and reopen Obsidian once.", cls: "openclaw-onboard-hint" });
+    const afterApproval = approvalInfo.createDiv(
+      "openclaw-onboard-numbered-item",
+    );
+    afterApproval.createEl("p", {
+      text: "After approval:",
+      cls: "openclaw-onboard-hint",
+    });
+    afterApproval.createEl("p", {
+      text: "Come back here and click “Check pairing status”. If it still says disconnected, close and reopen Obsidian once.",
+      cls: "openclaw-onboard-hint",
+    });
 
     const btnRow = el.createDiv("openclaw-onboard-buttons");
-    btnRow.createEl("button", { text: "← back" }).addEventListener("click", () => { this.step = this.step - 1; this.renderStep(); });
+    btnRow
+      .createEl("button", { text: "← back" })
+      .addEventListener("click", () => {
+        this.step = this.step - 1;
+        this.renderStep();
+      });
 
     const pairBtn = btnRow.createEl("button", {
       text: hasKeys ? "Check pairing status" : "Send pairing request",
       cls: "mod-cta",
     });
-    pairBtn.addEventListener("click", () => void (async () => {
-      pairBtn.disabled = true;
-      this.showStatus("Connecting to gateway...", "info");
+    pairBtn.addEventListener(
+      "click",
+      () =>
+        void (async () => {
+          pairBtn.disabled = true;
+          this.showStatus("Connecting to gateway...", "info");
 
-      try {
-        // Ensure we have a real connection to test pairing
-        await this.plugin.connectGateway();
+          try {
+            // Ensure we have a real connection to test pairing
+            await this.plugin.connectGateway();
 
-        // Wait a moment for connection to establish
-        await new Promise(r => window.setTimeout(r, 2000));
+            // Wait a moment for connection to establish
+            await new Promise((r) => window.setTimeout(r, 2000));
 
-        if (!this.plugin.gatewayConnected) {
-          const lastError = this.plugin.lastGatewayConnectError.toLowerCase();
-          if (lastError.includes("pair") || lastError.includes("device") || lastError.includes("approval") || lastError.includes("scope") || lastError.includes("auth")) {
-            this.showStatus("⏳ Pairing request sent. Approve it on the gateway, then click “Check pairing status”.\n\nIf you already approved it, wait a few seconds and click again.", "info");
-            pairBtn.textContent = "Check pairing status";
-          } else {
-            this.showStatus("Could not reach the gateway. Go back and check the gateway URL, token, Tailscale, and Serve status.", "error");
+            if (!this.plugin.gatewayConnected) {
+              const lastError =
+                this.plugin.lastGatewayConnectError.toLowerCase();
+              if (
+                lastError.includes("pair") ||
+                lastError.includes("device") ||
+                lastError.includes("approval") ||
+                lastError.includes("scope") ||
+                lastError.includes("auth")
+              ) {
+                this.showStatus(
+                  "⏳ Pairing request sent. Approve it on the gateway, then click “Check pairing status”.\n\nIf you already approved it, wait a few seconds and click again.",
+                  "info",
+                );
+                pairBtn.textContent = "Check pairing status";
+              } else {
+                this.showStatus(
+                  "Could not reach the gateway. Go back and check the gateway URL, token, Tailscale, and Serve status.",
+                  "error",
+                );
+              }
+              pairBtn.disabled = false;
+              return;
+            }
+
+            // Try a simple request to verify pairing
+            try {
+              const result = (await this.plugin.gateway!.request(
+                "sessions.list",
+                {},
+              )) as { sessions?: unknown[] } | null;
+              if (result?.sessions) {
+                this.showStatus(
+                  "✓ Device is paired and authorized!",
+                  "success",
+                );
+                window.setTimeout(() => {
+                  this.step = this.step + 1;
+                  this.renderStep();
+                }, 1000);
+                return;
+              }
+            } catch (e: unknown) {
+              // If we get an auth error, device needs approval
+              const msg = String(e);
+              if (
+                msg.includes("scope") ||
+                msg.includes("auth") ||
+                msg.includes("pair")
+              ) {
+                this.showStatus(
+                  "⏳ Pairing request sent! Now approve it on your gateway machine using the commands above.\n\nWaiting for approval...",
+                  "info",
+                );
+                this.startPairingPoll(pairBtn);
+                return;
+              }
+            }
+
+            // If we got here, connection works — might already be paired
+            this.showStatus("✓ Connection working! Proceeding...", "success");
+            window.setTimeout(() => {
+              this.step = this.step + 1;
+              this.renderStep();
+            }, 1000);
+          } catch (e) {
+            this.showStatus(`Error: ${e}`, "error");
+            pairBtn.disabled = false;
           }
-          pairBtn.disabled = false;
-          return;
-        }
-
-        // Try a simple request to verify pairing
-        try {
-          const result = await this.plugin.gateway!.request("sessions.list", {}) as { sessions?: unknown[] } | null;
-          if (result?.sessions) {
-            this.showStatus("✓ Device is paired and authorized!", "success");
-            window.setTimeout(() => { this.step = this.step + 1; this.renderStep(); }, 1000);
-            return;
-          }
-        } catch (e: unknown) {
-          // If we get an auth error, device needs approval
-          const msg = String(e);
-          if (msg.includes("scope") || msg.includes("auth") || msg.includes("pair")) {
-            this.showStatus("⏳ Pairing request sent! Now approve it on your gateway machine using the commands above.\n\nWaiting for approval...", "info");
-            this.startPairingPoll(pairBtn);
-            return;
-          }
-        }
-
-        // If we got here, connection works — might already be paired
-        this.showStatus("✓ Connection working! Proceeding...", "success");
-        window.setTimeout(() => { this.step = this.step + 1; this.renderStep(); }, 1000);
-      } catch (e) {
-        this.showStatus(`Error: ${e}`, "error");
-        pairBtn.disabled = false;
-      }
-    })());
+        })(),
+    );
 
     const skipBtn = btnRow.createEl("button", { text: "Skip for now" });
-    skipBtn.addEventListener("click", () => { this.step = this.step + 1; this.renderStep(); });
+    skipBtn.addEventListener("click", () => {
+      this.step = this.step + 1;
+      this.renderStep();
+    });
   }
 
   private startPairingPoll(btn: HTMLButtonElement): void {
     let attempts = 0;
-    this.pairingPollTimer = window.setInterval(() => void (async () => {
-      attempts++;
-      if (attempts > 60) { // 2 minutes
-        if (this.pairingPollTimer) window.clearInterval(this.pairingPollTimer);
-        this.showStatus("Timed out waiting for approval. You can approve later and re-run the setup wizard from settings.", "error");
-        btn.disabled = false;
-        return;
-      }
-      try {
-        const result = await this.plugin.gateway?.request("sessions.list", {}) as { sessions?: unknown[] } | null;
-        if (result?.sessions) {
-          if (this.pairingPollTimer) window.clearInterval(this.pairingPollTimer);
-          this.showStatus("✓ Device approved!", "success");
-          window.setTimeout(() => { this.step = this.step + 1; this.renderStep(); }, 1000);
-        }
-      } catch { /* still waiting */ }
-    })(), 2000);
+    this.pairingPollTimer = window.setInterval(
+      () =>
+        void (async () => {
+          attempts++;
+          if (attempts > 60) {
+            // 2 minutes
+            if (this.pairingPollTimer)
+              window.clearInterval(this.pairingPollTimer);
+            this.showStatus(
+              "Timed out waiting for approval. You can approve later and re-run the setup wizard from settings.",
+              "error",
+            );
+            btn.disabled = false;
+            return;
+          }
+          try {
+            const result = (await this.plugin.gateway?.request(
+              "sessions.list",
+              {},
+            )) as { sessions?: unknown[] } | null;
+            if (result?.sessions) {
+              if (this.pairingPollTimer)
+                window.clearInterval(this.pairingPollTimer);
+              this.showStatus("✓ Device approved!", "success");
+              window.setTimeout(() => {
+                this.step = this.step + 1;
+                this.renderStep();
+              }, 1000);
+            }
+          } catch {
+            /* still waiting */
+          }
+        })(),
+      2000,
+    );
   }
 
   // ─── Step 5: Done ────────────────────────────────────────────────
@@ -1264,9 +1899,15 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
     tips.createEl("h3", { text: "What you can do" });
     const list = tips.createEl("ul", { cls: "openclaw-onboard-list" });
     list.createEl("li", { text: "Chat with your AI agent in the sidebar" });
-    list.createEl("li", { text: "Use Cmd/Ctrl+P → \"Ask about current note\" to discuss any note" });
-    list.createEl("li", { text: "The agent can read, create, and edit files in your vault" });
-    list.createEl("li", { text: "Tool calls appear inline — click file paths to open them" });
+    list.createEl("li", {
+      text: 'Use Cmd/Ctrl+P → "Ask about current note" to discuss any note',
+    });
+    list.createEl("li", {
+      text: "The agent can read, create, and edit files in your vault",
+    });
+    list.createEl("li", {
+      text: "Tool calls appear inline — click file paths to open them",
+    });
 
     const syncTip = el.createDiv("openclaw-onboard-info");
     syncTip.createEl("strong", { text: "💡 sync tip: " });
@@ -1277,22 +1918,31 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
     const controlTip = el.createDiv("openclaw-onboard-info");
     controlTip.createEl("strong", { text: "🖥️ control UI: " });
     const ctrlSpan = controlTip.createSpan();
-    ctrlSpan.setText("You can also manage your gateway from any browser on your Tailscale network. Just open your gateway URL in a browser.");
+    ctrlSpan.setText(
+      "You can also manage your gateway from any browser on your Tailscale network. Just open your gateway URL in a browser.",
+    );
 
     const btnRow = el.createDiv("openclaw-onboard-buttons");
-    const doneBtn = btnRow.createEl("button", { text: "Start chatting →", cls: "mod-cta" });
-    doneBtn.addEventListener("click", () => void (async () => {
-      this.plugin.settings.onboardingComplete = true;
-      // Always reset to "main" session to ensure clean connection
-      this.plugin.settings.sessionKey = "main";
-      await this.plugin.saveSettings();
-      this.close();
-      // Force reconnect (picks up new URL/token) and sync the chat view
-      void this.plugin.connectGateway();
-      void this.plugin.activateView().then(() => {
-        this.plugin.chatView?.syncFromSettings();
-      });
-    })());
+    const doneBtn = btnRow.createEl("button", {
+      text: "Start chatting →",
+      cls: "mod-cta",
+    });
+    doneBtn.addEventListener(
+      "click",
+      () =>
+        void (async () => {
+          this.plugin.settings.onboardingComplete = true;
+          // Always reset to "main" session to ensure clean connection
+          this.plugin.settings.sessionKey = "main";
+          await this.plugin.saveSettings();
+          this.close();
+          // Force reconnect (picks up new URL/token) and sync the chat view
+          void this.plugin.connectGateway();
+          void this.plugin.activateView().then(() => {
+            this.plugin.chatView?.syncFromSettings();
+          });
+        })(),
+    );
   }
 
   private showStatus(text: string, type: "info" | "success" | "error"): void {
@@ -1304,6 +1954,114 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
       if (this.statusEl.childNodes.length > 0) this.statusEl.createEl("br");
       this.statusEl.appendText(line);
     }
+  }
+}
+
+// ─── Inline @-mention suggest ────────────────────────────────────────
+
+/** Best-effort image MIME from a vault file extension (for base64 sends). */
+function imageMimeFromExt(ext: string): string {
+  const e = ext.toLowerCase();
+  if (e === "jpg" || e === "jpeg") return "image/jpeg";
+  if (e === "svg") return "image/svg+xml";
+  return `image/${e}`;
+}
+
+interface SuggestItem {
+  path: string;
+  display: string;
+}
+
+/**
+ * A lightweight dropdown anchored to the input area, used for @-mention file
+ * picking. Owns its overlay element, the item list, and the highlight state;
+ * the chat view feeds it ranked items and handles the chosen result.
+ */
+class InlineSuggest {
+  private containerEl: HTMLElement;
+  private listEl: HTMLElement;
+  private items: SuggestItem[] = [];
+  private selectedIndex = 0;
+  private open = false;
+  /** Called when the user picks an item (click or Enter). */
+  onChoose: (item: SuggestItem) => void = () => {};
+
+  constructor(host: HTMLElement) {
+    this.containerEl = host.createDiv("openclaw-suggest");
+    this.containerEl.addClass("oc-hidden");
+    this.listEl = this.containerEl.createDiv("openclaw-suggest-list");
+  }
+
+  get isOpen(): boolean {
+    return this.open;
+  }
+
+  /** Show the dropdown with a fresh set of items (resets the highlight). */
+  show(items: SuggestItem[]): void {
+    this.items = items;
+    this.selectedIndex = 0;
+    this.open = true;
+    this.containerEl.removeClass("oc-hidden");
+    this.render();
+  }
+
+  /** Replace items while staying open (keeps the highlight in range). */
+  update(items: SuggestItem[]): void {
+    this.items = items;
+    this.selectedIndex = Math.min(
+      this.selectedIndex,
+      Math.max(0, items.length - 1),
+    );
+    this.render();
+  }
+
+  close(): void {
+    this.open = false;
+    this.items = [];
+    this.containerEl.addClass("oc-hidden");
+    this.listEl.empty();
+  }
+
+  /** Move the highlight by delta, wrapping around the list. */
+  moveSelection(delta: number): void {
+    if (this.items.length === 0) return;
+    const n = this.items.length;
+    this.selectedIndex = (this.selectedIndex + delta + n) % n;
+    this.render();
+  }
+
+  /** Return the highlighted item without closing. */
+  current(): SuggestItem | null {
+    return this.items[this.selectedIndex] ?? null;
+  }
+
+  private render(): void {
+    this.listEl.empty();
+    if (this.items.length === 0) {
+      this.listEl.createDiv({
+        cls: "openclaw-suggest-empty",
+        text: "No matching files",
+      });
+      return;
+    }
+    this.items.forEach((item, i) => {
+      const row = this.listEl.createDiv("openclaw-suggest-item");
+      if (i === this.selectedIndex) row.addClass("is-selected");
+      const slash = item.display.lastIndexOf("/");
+      const name = slash >= 0 ? item.display.slice(slash + 1) : item.display;
+      const dir = slash >= 0 ? item.display.slice(0, slash + 1) : "";
+      row.createSpan({ cls: "openclaw-suggest-name", text: name });
+      if (dir) row.createSpan({ cls: "openclaw-suggest-path", text: dir });
+      row.addEventListener("mousedown", (e) => {
+        // mousedown (not click) so the textarea doesn't blur first
+        e.preventDefault();
+        this.onChoose(item);
+      });
+      row.addEventListener("mouseenter", () => {
+        this.selectedIndex = i;
+        this.render();
+      });
+    });
   }
 }
 
@@ -1339,25 +2097,32 @@ class OpenClawChatView extends ItemView {
   private messages: ChatMessage[] = [];
 
   // ─── Per-session stream state ──────────────────────────────────────
-  private streams = new Map<string, {
-    runId: string;
-    text: string | null;
-    toolCalls: string[];
-    items: StreamItem[];
-    splitPoints: number[];
-    lastDeltaTime: number;
-    compactTimer: number | null;
-    workingTimer: number | null;
-  }>();
+  private streams = new Map<
+    string,
+    {
+      runId: string;
+      text: string | null;
+      toolCalls: string[];
+      items: StreamItem[];
+      splitPoints: number[];
+      lastDeltaTime: number;
+      compactTimer: number | null;
+      workingTimer: number | null;
+    }
+  >();
   /** Map runId -> sessionKey so we can route stream events that lack sessionKey */
   private runToSession = new Map<string, string>();
 
   private streamEl: HTMLElement | null = null;
 
   /** Get current active session key */
-  private get activeSessionKey(): string { return this.plugin.settings.sessionKey || "main"; }
+  private get activeSessionKey(): string {
+    return this.plugin.settings.sessionKey || "main";
+  }
   /** Get stream state for active tab (if any) */
-  private get activeStream() { return this.streams.get(this.activeSessionKey) ?? null; }
+  private get activeStream() {
+    return this.streams.get(this.activeSessionKey) ?? null;
+  }
 
   private contextMeterEl!: HTMLElement;
   private contextFillEl!: HTMLElement;
@@ -1378,13 +2143,31 @@ class OpenClawChatView extends ItemView {
 
   // Agent switcher state
   private agents: AgentInfo[] = [];
-  private activeAgent: AgentInfo = { id: "main", name: "Agent", emoji: "🤖", creature: "" };
+  private activeAgent: AgentInfo = {
+    id: "main",
+    name: "Agent",
+    emoji: "🤖",
+    creature: "",
+  };
   private profileBtnEl: HTMLElement | null = null;
   private profileDropdownEl: HTMLElement | null = null;
   private typingEl!: HTMLElement;
   private attachPreviewEl!: HTMLElement;
+  private suggest!: InlineSuggest;
+  private activeMention: { query: string; start: number } | null = null;
   private fileInputEl!: HTMLInputElement;
-  private pendingAttachments: { name: string; content: string; vaultPath?: string; base64?: string; mimeType?: string }[] = [];
+  // `inline`/`token`: @-mention attachments shown as inline text (no chip). The
+  // token is the exact `@path` string inserted; if it's gone from the textarea,
+  // the attachment is reconciled away (see reconcileInlineMentions).
+  private pendingAttachments: {
+    name: string;
+    content: string;
+    vaultPath?: string;
+    base64?: string;
+    mimeType?: string;
+    inline?: boolean;
+    token?: string;
+  }[] = [];
   private sending = false;
   private recording = false;
   private mediaRecorder: MediaRecorder | null = null;
@@ -1428,10 +2211,20 @@ class OpenClawChatView extends ItemView {
 
     // Tab bar (browser-like tabs)
     this.tabBarEl = topBar.createDiv("openclaw-tab-bar");
-    this.tabBarEl.addEventListener("wheel", (e) => { e.preventDefault(); this.tabBarEl.scrollLeft += e.deltaY; }, { passive: false });
+    this.tabBarEl.addEventListener(
+      "wheel",
+      (e) => {
+        e.preventDefault();
+        this.tabBarEl.scrollLeft += e.deltaY;
+      },
+      { passive: false },
+    );
 
     // Control panel button (left side, ClawTabs-style)
-    const controlBtn = topBar.createEl("button", { cls: "oc-control-panel-btn", attr: { "aria-label": "Control panel" } });
+    const controlBtn = topBar.createEl("button", {
+      cls: "oc-control-panel-btn",
+      attr: { "aria-label": "Control panel" },
+    });
     createSvgIcon(controlBtn, SVG_CONTROL_PANEL);
     controlBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1442,7 +2235,10 @@ class OpenClawChatView extends ItemView {
     this.hamburgerBarEl = topBar.createDiv("oc-hamburger-bar");
 
     // Mobile control panel button (left side)
-    const hamburgerControlBtn = this.hamburgerBarEl.createEl("button", { cls: "oc-hamburger-dash-btn", attr: { "aria-label": "Control panel" } });
+    const hamburgerControlBtn = this.hamburgerBarEl.createEl("button", {
+      cls: "oc-hamburger-dash-btn",
+      attr: { "aria-label": "Control panel" },
+    });
     createSvgIcon(hamburgerControlBtn, SVG_CONTROL_PANEL);
     hamburgerControlBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1451,47 +2247,68 @@ class OpenClawChatView extends ItemView {
 
     // Tab switcher
     const tabSwitcher = this.hamburgerBarEl.createDiv("oc-tab-switcher");
-    this.tabArrowLeftEl = tabSwitcher.createEl("button", { cls: "oc-tab-switcher-arrow oc-arrow-left" });
+    this.tabArrowLeftEl = tabSwitcher.createEl("button", {
+      cls: "oc-tab-switcher-arrow oc-arrow-left",
+    });
     createSvgIcon(this.tabArrowLeftEl, SVG_CHEVRON_LEFT);
     const switcherCurrent = tabSwitcher.createDiv("oc-tab-switcher-current");
     const switcherRow = switcherCurrent.createDiv("oc-tab-switcher-row");
     this.tabSwitcherLabelEl = switcherRow.createSpan("oc-tab-switcher-label");
     this.tabSwitcherLabelEl.textContent = "Home";
-    this.tabSwitcherActionsEl = switcherRow.createSpan("oc-tab-switcher-actions");
+    this.tabSwitcherActionsEl = switcherRow.createSpan(
+      "oc-tab-switcher-actions",
+    );
     const switcherMeter = switcherCurrent.createDiv("oc-tab-switcher-meter");
-    this.tabSwitcherMeterFillEl = switcherMeter.createDiv("oc-tab-switcher-meter-fill");
-    this.tabArrowRightEl = tabSwitcher.createEl("button", { cls: "oc-tab-switcher-arrow oc-arrow-right" });
+    this.tabSwitcherMeterFillEl = switcherMeter.createDiv(
+      "oc-tab-switcher-meter-fill",
+    );
+    this.tabArrowRightEl = tabSwitcher.createEl("button", {
+      cls: "oc-tab-switcher-arrow oc-arrow-right",
+    });
     createSvgIcon(this.tabArrowRightEl, SVG_CHEVRON_RIGHT);
 
     // Hamburger button lives on the right in ClawTabs mobile mode
-    const hamburgerBtn = this.hamburgerBarEl.createEl("button", { cls: "oc-hamburger-btn", attr: { "aria-label": "Tabs" } });
+    const hamburgerBtn = this.hamburgerBarEl.createEl("button", {
+      cls: "oc-hamburger-btn",
+      attr: { "aria-label": "Tabs" },
+    });
     createSvgIcon(hamburgerBtn, SVG_HAMBURGER);
 
     // Hamburger dropdown
-    this.hamburgerDropdownEl2 = this.hamburgerBarEl.createDiv("oc-hamburger-dropdown");
+    this.hamburgerDropdownEl2 = this.hamburgerBarEl.createDiv(
+      "oc-hamburger-dropdown",
+    );
 
     // Arrow click handlers
     this.tabArrowLeftEl.addEventListener("click", (e) => {
       e.stopPropagation();
       const currentKey = this.plugin.settings.sessionKey || "main";
-      const idx = this.tabSessions.findIndex(t => t.key === currentKey);
+      const idx = this.tabSessions.findIndex((t) => t.key === currentKey);
       if (idx > 0) this.switchToTab(this.tabSessions[idx - 1]);
     });
     this.tabArrowRightEl.addEventListener("click", (e) => {
       e.stopPropagation();
       const currentKey = this.plugin.settings.sessionKey || "main";
-      const idx = this.tabSessions.findIndex(t => t.key === currentKey);
-      if (idx < this.tabSessions.length - 1) this.switchToTab(this.tabSessions[idx + 1]);
+      const idx = this.tabSessions.findIndex((t) => t.key === currentKey);
+      if (idx < this.tabSessions.length - 1)
+        this.switchToTab(this.tabSessions[idx + 1]);
     });
 
     // Hamburger button toggles dropdown
     hamburgerBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       this.renderHamburgerDropdown();
-      this.hamburgerDropdownEl2.toggleClass("oc-open", !this.hamburgerDropdownEl2.hasClass("oc-open"));
+      this.hamburgerDropdownEl2.toggleClass(
+        "oc-open",
+        !this.hamburgerDropdownEl2.hasClass("oc-open"),
+      );
     });
     activeDocument.addEventListener("click", (e) => {
-      if (!this.hamburgerDropdownEl2.contains(e.target as Node) && e.target !== hamburgerBtn && !hamburgerBtn.contains(e.target as Node)) {
+      if (
+        !this.hamburgerDropdownEl2.contains(e.target as Node) &&
+        e.target !== hamburgerBtn &&
+        !hamburgerBtn.contains(e.target as Node)
+      ) {
         this.hamburgerDropdownEl2.removeClass("oc-open");
       }
     });
@@ -1513,12 +2330,18 @@ class OpenClawChatView extends ItemView {
     this.profileDropdownEl.addClass("oc-hidden");
 
     // Control panel drawer (compact Obsidian version of ClawTabs dashboard)
-    this.controlPanelBackdropEl = container.createDiv("oc-control-panel-backdrop oc-hidden");
+    this.controlPanelBackdropEl = container.createDiv(
+      "oc-control-panel-backdrop oc-hidden",
+    );
     this.controlPanelEl = container.createDiv("oc-control-panel oc-hidden");
-    this.controlPanelBackdropEl.addEventListener("click", () => this.closeControlPanel());
+    this.controlPanelBackdropEl.addEventListener("click", () =>
+      this.closeControlPanel(),
+    );
 
     // Close dropdown when clicking outside
-    activeDocument.addEventListener("click", () => { if (this.profileDropdownEl) this.profileDropdownEl.addClass("oc-hidden"); });
+    activeDocument.addEventListener("click", () => {
+      if (this.profileDropdownEl) this.profileDropdownEl.addClass("oc-hidden");
+    });
 
     // We'll render tabs after loading sessions
     void this.renderTabs();
@@ -1551,28 +2374,58 @@ class OpenClawChatView extends ItemView {
     const inputArea = container.createDiv("openclaw-input-area");
     // Meta row (model pill above input)
     const inputMeta = inputArea.createDiv("openclaw-input-meta");
-    this.brainBtnEl = inputMeta.createEl("button", { cls: "openclaw-brain-btn", attr: { "aria-label": "Switch model" } });
+    this.brainBtnEl = inputMeta.createEl("button", {
+      cls: "openclaw-brain-btn",
+      attr: { "aria-label": "Switch model" },
+    });
     this.brainBtnEl.textContent = "model";
     this.brainBtnEl.createSpan({ text: " ▾", cls: "openclaw-brain-btn-arrow" });
     this.brainBtnEl.addEventListener("click", () => this.openModelPicker());
 
     // Bar control chips (thinking + show steps)
     inputMeta.createSpan({ text: "·", cls: "oc-bar-sep" });
-    this.thinkChipEl = inputMeta.createSpan({ text: "think: default", cls: "oc-bar-chip" });
-    this.thinkChipEl.addEventListener("click", () => { void this.cycleBarControl("thinkingLevel", ["", "off", "low", "medium", "high"]); });
+    this.thinkChipEl = inputMeta.createSpan({
+      text: "think: default",
+      cls: "oc-bar-chip",
+    });
+    this.thinkChipEl.addEventListener("click", () => {
+      void this.cycleBarControl("thinkingLevel", [
+        "",
+        "off",
+        "low",
+        "medium",
+        "high",
+      ]);
+    });
     inputMeta.createSpan({ text: "·", cls: "oc-bar-sep" });
-    this.verboseChipEl = inputMeta.createSpan({ text: "show steps: default", cls: "oc-bar-chip" });
-    this.verboseChipEl.addEventListener("click", () => { void this.cycleBarControl("verboseLevel", ["", "off", "on", "full"]); });
+    this.verboseChipEl = inputMeta.createSpan({
+      text: "show steps: default",
+      cls: "oc-bar-chip",
+    });
+    this.verboseChipEl.addEventListener("click", () => {
+      void this.cycleBarControl("verboseLevel", ["", "off", "on", "full"]);
+    });
     const inputRow = inputArea.createDiv("openclaw-input-row");
     // Attach button + hidden file input
-    const attachBtn = inputRow.createEl("button", { cls: "openclaw-attach-btn", attr: { "aria-label": "Attach file" } });
+    const attachBtn = inputRow.createEl("button", {
+      cls: "openclaw-attach-btn",
+      attr: { "aria-label": "Attach file" },
+    });
     setIcon(attachBtn, "plus");
     this.fileInputEl = inputArea.createEl("input", {
       cls: "openclaw-file-input",
-      attr: { type: "file", accept: "image/*,.md,.txt,.json,.csv,.pdf,.yaml,.yml,.js,.ts,.py,.html,.css", multiple: "true" },
+      attr: {
+        type: "file",
+        accept:
+          "image/*,.md,.txt,.json,.csv,.pdf,.yaml,.yml,.js,.ts,.py,.html,.css",
+        multiple: "true",
+      },
     });
     this.fileInputEl.addClass("oc-hidden");
-    this.fileInputEl.addEventListener("change", () => void this.handleFileSelect());
+    this.fileInputEl.addEventListener(
+      "change",
+      () => void this.handleFileSelect(),
+    );
     attachBtn.addEventListener("click", () => this.fileInputEl.click());
     this.inputEl = inputRow.createEl("textarea", {
       cls: "openclaw-input",
@@ -1581,14 +2434,26 @@ class OpenClawChatView extends ItemView {
     // Attachment preview (hidden by default)
     this.attachPreviewEl = inputArea.createDiv("openclaw-attach-preview");
     this.attachPreviewEl.addClass("oc-hidden");
-    this.abortBtn = inputRow.createEl("button", { cls: "openclaw-abort-btn", attr: { "aria-label": "Stop" } });
+    // @-mention file picker dropdown (anchored to the input area)
+    this.suggest = new InlineSuggest(inputArea);
+    this.suggest.onChoose = (item) => void this.chooseMention(item);
+    this.abortBtn = inputRow.createEl("button", {
+      cls: "openclaw-abort-btn",
+      attr: { "aria-label": "Stop" },
+    });
     setIcon(this.abortBtn, "square");
     this.abortBtn.addClass("oc-hidden");
     const sendWrapper = inputRow.createDiv("openclaw-send-wrapper");
-    this.sendBtn = sendWrapper.createEl("button", { cls: "openclaw-send-btn", attr: { "aria-label": "Send" } });
+    this.sendBtn = sendWrapper.createEl("button", {
+      cls: "openclaw-send-btn",
+      attr: { "aria-label": "Send" },
+    });
     setIcon(this.sendBtn, "send");
     this.sendBtn.addClass("oc-opacity-low");
-    this.reconnectBtn = sendWrapper.createEl("button", { cls: "openclaw-reconnect-btn", attr: { "aria-label": "Reconnect" } });
+    this.reconnectBtn = sendWrapper.createEl("button", {
+      cls: "openclaw-reconnect-btn",
+      attr: { "aria-label": "Reconnect" },
+    });
     setIcon(this.reconnectBtn, "refresh-cw");
     this.reconnectBtn.addClass("oc-hidden");
     this.reconnectBtn.addEventListener("click", () => {
@@ -1598,6 +2463,32 @@ class OpenClawChatView extends ItemView {
 
     // Events
     this.inputEl.addEventListener("keydown", (e) => {
+      // @-mention dropdown captures navigation keys while open
+      if (this.suggest.isOpen) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          this.suggest.moveSelection(1);
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          this.suggest.moveSelection(-1);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          this.closeMentionSuggest();
+          return;
+        }
+        if (e.key === "Enter" || e.key === "Tab") {
+          const item = this.suggest.current();
+          if (item) {
+            e.preventDefault();
+            void this.chooseMention(item);
+            return;
+          }
+        }
+      }
       if (e.key === "Enter") {
         // Mobile: Enter always creates new line (use send button to send)
         // Desktop: Enter sends, Shift+Enter creates new line
@@ -1614,6 +2505,11 @@ class OpenClawChatView extends ItemView {
     this.inputEl.addEventListener("input", () => {
       this.autoResize();
       this.updateSendButton();
+      this.updateMentionSuggest();
+      this.reconcileInlineMentions();
+    });
+    this.inputEl.addEventListener("blur", () => {
+      if (this.suggest.isOpen) this.closeMentionSuggest();
     });
     this.inputEl.addEventListener("focus", () => {
       window.setTimeout(() => {
@@ -1651,41 +2547,60 @@ class OpenClawChatView extends ItemView {
     try {
       type KeyboardResizeMode = "none" | "native" | "body" | "ionic";
       type KeyboardPlugin = {
-        setResizeMode?: (opts: { mode: KeyboardResizeMode }) => Promise<void> | void;
-        addListener: (eventName: "keyboardWillShow" | "keyboardDidHide", listener: () => void) => unknown;
+        setResizeMode?: (opts: {
+          mode: KeyboardResizeMode;
+        }) => Promise<void> | void;
+        addListener: (
+          eventName: "keyboardWillShow" | "keyboardDidHide",
+          listener: () => void,
+        ) => unknown;
       };
       type CapacitorRuntime = {
         Plugins?: {
           Keyboard?: KeyboardPlugin;
         };
       };
-      const cap = (window as unknown as { Capacitor?: CapacitorRuntime }).Capacitor;
+      const cap = (window as unknown as { Capacitor?: CapacitorRuntime })
+        .Capacitor;
       if (cap?.Plugins?.Keyboard) {
         const kb = cap.Plugins.Keyboard;
 
         // Set resize mode to native so webview shrinks
-        await kb.setResizeMode?.({ mode: 'native' });
+        await kb.setResizeMode?.({ mode: "native" });
 
         // Find bottom drawer siblings that waste space
-        const drawerInner = container.closest<HTMLElement>('.workspace-drawer-inner');
-        const tabContainer = drawerInner?.querySelector<HTMLElement>('.workspace-drawer-tab-container') ?? null;
+        const drawerInner = container.closest<HTMLElement>(
+          ".workspace-drawer-inner",
+        );
+        const tabContainer =
+          drawerInner?.querySelector<HTMLElement>(
+            ".workspace-drawer-tab-container",
+          ) ?? null;
         let hiddenSiblings: HTMLElement[] = [];
 
         const onKeyboardShow = () => {
           if (!drawerInner || !tabContainer) return;
           // Hide all siblings of workspace-drawer-tab-container (tab dots, bottom panes)
           hiddenSiblings = [];
-          for (const child of Array.from(drawerInner.children) as HTMLElement[]) {
+          for (const child of Array.from(
+            drawerInner.children,
+          ) as HTMLElement[]) {
             if (child !== tabContainer && !child.hasClass("oc-hidden")) {
               hiddenSiblings.push(child);
               child.addClass("oc-hidden");
             }
           }
           // Also hide tab header within the tab container (the "Plugin" header bar)
-          const activeTabContainer = tabContainer.querySelector<HTMLElement>('.workspace-drawer-active-tab-container');
+          const activeTabContainer = tabContainer.querySelector<HTMLElement>(
+            ".workspace-drawer-active-tab-container",
+          );
           if (activeTabContainer) {
-            for (const child of Array.from(activeTabContainer.children) as HTMLElement[]) {
-              const isContent = child.classList.contains('workspace-drawer-active-tab-content');
+            for (const child of Array.from(
+              activeTabContainer.children,
+            ) as HTMLElement[]) {
+              const isContent = child.classList.contains(
+                "workspace-drawer-active-tab-content",
+              );
               if (!isContent && !child.hasClass("oc-hidden")) {
                 hiddenSiblings.push(child);
                 child.addClass("oc-hidden");
@@ -1703,24 +2618,26 @@ class OpenClawChatView extends ItemView {
         };
 
         // Listen for Capacitor keyboard events
-        kb.addListener('keyboardWillShow', onKeyboardShow);
-        kb.addListener('keyboardDidHide', onKeyboardHide);
-        window.addEventListener('keyboardWillShow', onKeyboardShow);
-        window.addEventListener('keyboardDidHide', onKeyboardHide);
+        kb.addListener("keyboardWillShow", onKeyboardShow);
+        kb.addListener("keyboardDidHide", onKeyboardHide);
+        window.addEventListener("keyboardWillShow", onKeyboardShow);
+        window.addEventListener("keyboardDidHide", onKeyboardHide);
 
         // Restore on view close
         this.register(() => {
-          void kb.setResizeMode?.({ mode: 'none' });
+          void kb.setResizeMode?.({ mode: "none" });
           onKeyboardHide();
-          window.removeEventListener('keyboardWillShow', onKeyboardShow);
-          window.removeEventListener('keyboardDidHide', onKeyboardHide);
+          window.removeEventListener("keyboardWillShow", onKeyboardShow);
+          window.removeEventListener("keyboardDidHide", onKeyboardHide);
         });
       }
-    } catch { /* not on mobile / Capacitor not available */ }
-    
+    } catch {
+      /* not on mobile / Capacitor not available */
+    }
+
     // Init touch gestures for mobile
     this.initTouchGestures();
-    
+
     if (this.plugin.gatewayConnected) {
       await this.loadHistory();
       void this.loadAgents();
@@ -1754,34 +2671,65 @@ class OpenClawChatView extends ItemView {
     if (!panel) return;
     panel.empty();
 
-    const close = panel.createEl("button", { text: "×", cls: "oc-control-panel-close", attr: { "aria-label": "Close" } });
+    const close = panel.createEl("button", {
+      text: "×",
+      cls: "oc-control-panel-close",
+      attr: { "aria-label": "Close" },
+    });
     close.addEventListener("click", () => this.closeControlPanel());
 
     const agentCard = panel.createDiv("oc-hud-agent-card");
     const identity = agentCard.createDiv("oc-hud-identity");
-    const orb = identity.createDiv(`oc-hud-orb${this.plugin.gatewayConnected ? " online" : ""}`);
-    orb.createSpan({ text: this.activeAgent.emoji || "🤖", cls: "oc-hud-orb-emoji" });
+    const orb = identity.createDiv(
+      `oc-hud-orb${this.plugin.gatewayConnected ? " online" : ""}`,
+    );
+    orb.createSpan({
+      text: this.activeAgent.emoji || "🤖",
+      cls: "oc-hud-orb-emoji",
+    });
     const info = identity.createDiv("oc-hud-identity-info");
-    info.createDiv({ text: this.activeAgent.name || this.activeAgent.id || "Oscar", cls: "oc-hud-agent-name" });
-    info.createDiv({ text: this.plugin.gatewayConnected ? "online" : "disconnected", cls: `oc-hud-status-line${this.plugin.gatewayConnected ? " online" : ""}` });
+    info.createDiv({
+      text: this.activeAgent.name || this.activeAgent.id || "Oscar",
+      cls: "oc-hud-agent-name",
+    });
+    info.createDiv({
+      text: this.plugin.gatewayConnected ? "online" : "disconnected",
+      cls: `oc-hud-status-line${this.plugin.gatewayConnected ? " online" : ""}`,
+    });
 
     if (this.agents.length > 1) {
       const agentsRow = agentCard.createDiv("oc-agent-row");
       for (const agent of this.agents) {
-        const pill = agentsRow.createEl("button", { cls: `oc-agent-pill${agent.id === this.activeAgent.id ? " oc-agent-active" : ""}` });
-        pill.createSpan({ text: agent.emoji || "🤖", cls: "oc-agent-pill-emoji" });
-        pill.createSpan({ text: agent.name || agent.id, cls: "oc-agent-pill-name" });
-        pill.addEventListener("click", () => void (async () => {
-          await this.switchAgent(agent);
-          this.renderControlPanel();
-        })());
+        const pill = agentsRow.createEl("button", {
+          cls: `oc-agent-pill${agent.id === this.activeAgent.id ? " oc-agent-active" : ""}`,
+        });
+        pill.createSpan({
+          text: agent.emoji || "🤖",
+          cls: "oc-agent-pill-emoji",
+        });
+        pill.createSpan({
+          text: agent.name || agent.id,
+          cls: "oc-agent-pill-name",
+        });
+        pill.addEventListener(
+          "click",
+          () =>
+            void (async () => {
+              await this.switchAgent(agent);
+              this.renderControlPanel();
+            })(),
+        );
       }
     }
 
     panel.createDiv({ text: "SETTINGS", cls: "oc-hud-group-label" });
 
     const section = panel.createDiv("oc-hud-section");
-    const addRow = (label: string, value: string, onClick: (() => void) | null = null) => {
+    const addRow = (
+      label: string,
+      value: string,
+      onClick: (() => void) | null = null,
+    ) => {
       const row = section.createEl("button", { cls: "oc-hud-section-toggle" });
       row.createSpan({ text: label, cls: "oc-hud-section-label" });
       row.createSpan({ text: value, cls: "oc-hud-section-value" });
@@ -1790,19 +2738,39 @@ class OpenClawChatView extends ItemView {
       else row.disabled = true;
     };
 
-    addRow("AI MODEL DEFAULTS", this.currentModel ? this.shortModelName(this.currentModel) : "default", () => {
-      this.closeControlPanel();
-      this.openModelPicker();
-    });
+    addRow(
+      "AI MODEL DEFAULTS",
+      this.currentModel ? this.shortModelName(this.currentModel) : "default",
+      () => {
+        this.closeControlPanel();
+        this.openModelPicker();
+      },
+    );
 
     const reliabilityValue = `thinking ${this.thinkingLevel || this.thinkingDefault || "default"} · steps ${this.verboseLevel || this.verboseDefault || "default"}`;
-    addRow("RELIABILITY DEFAULTS", reliabilityValue, () => void (async () => {
-      await this.cycleBarControl("thinkingLevel", ["", "off", "low", "medium", "high"]);
-      await this.cycleBarControl("verboseLevel", ["", "off", "on", "full"]);
-      this.renderControlPanel();
-    })());
+    addRow(
+      "RELIABILITY DEFAULTS",
+      reliabilityValue,
+      () =>
+        void (async () => {
+          await this.cycleBarControl("thinkingLevel", [
+            "",
+            "off",
+            "low",
+            "medium",
+            "high",
+          ]);
+          await this.cycleBarControl("verboseLevel", ["", "off", "on", "full"]);
+          this.renderControlPanel();
+        })(),
+    );
 
-    addRow("SERVER", this.plugin.settings.gatewayUrl.replace(/^wss?:\/\//, "") || "not configured", null);
+    addRow(
+      "SERVER",
+      this.plugin.settings.gatewayUrl.replace(/^wss?:\/\//, "") ||
+        "not configured",
+      null,
+    );
 
     const footer = panel.createDiv("oc-hud-footer");
     footer.createSpan({ text: `OBSIDIANCLAW ${this.plugin.manifest.version}` });
@@ -1847,29 +2815,46 @@ class OpenClawChatView extends ItemView {
 
   showPairingBanner(): void {
     if (this.pairingBannerEl) return; // already showing
-    this.pairingBannerEl = this.messagesEl.parentElement!.createDiv("openclaw-pairing-banner");
-    this.messagesEl.parentElement!.insertBefore(this.pairingBannerEl, this.messagesEl);
+    this.pairingBannerEl = this.messagesEl.parentElement!.createDiv(
+      "openclaw-pairing-banner",
+    );
+    this.messagesEl.parentElement!.insertBefore(
+      this.pairingBannerEl,
+      this.messagesEl,
+    );
 
-    this.pairingBannerEl.createDiv({ text: "🔐 Device pairing required", cls: "openclaw-pairing-title" });
+    this.pairingBannerEl.createDiv({
+      text: "🔐 Device pairing required",
+      cls: "openclaw-pairing-title",
+    });
     this.pairingBannerEl.createEl("p", {
       text: "This device needs approval before it can connect.",
       cls: "openclaw-pairing-desc",
     });
 
-    const opt1Label = this.pairingBannerEl.createEl("p", { text: "Run on the server:", cls: "openclaw-pairing-option-label" });
-    const copyBox = opt1Label.parentElement!.createDiv("openclaw-pairing-copy-box");
+    const opt1Label = this.pairingBannerEl.createEl("p", {
+      text: "Run on the server:",
+      cls: "openclaw-pairing-option-label",
+    });
+    const copyBox = opt1Label.parentElement!.createDiv(
+      "openclaw-pairing-copy-box",
+    );
     copyBox.createEl("code", { text: "openclaw devices approve --latest" });
     const copyBtn = copyBox.createSpan("openclaw-pairing-copy-btn");
     copyBtn.textContent = "Copy";
     copyBox.addEventListener("click", () => {
-      void navigator.clipboard.writeText("openclaw devices approve --latest").then(() => {
-        copyBtn.textContent = "✓";
-        window.setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
-      });
+      void navigator.clipboard
+        .writeText("openclaw devices approve --latest")
+        .then(() => {
+          copyBtn.textContent = "✓";
+          window.setTimeout(() => {
+            copyBtn.textContent = "Copy";
+          }, 1500);
+        });
     });
 
     this.pairingBannerEl.createEl("p", {
-      text: "Or tell your bot on another channel: \"approve the pending device\"",
+      text: 'Or tell your bot on another channel: "approve the pending device"',
       cls: "openclaw-pairing-desc openclaw-pairing-alt",
     });
 
@@ -1890,7 +2875,9 @@ class OpenClawChatView extends ItemView {
     if (!this.plugin.gateway?.connected) return;
     try {
       // Get agent list
-      const result = await this.plugin.gateway.request("agents.list", {}) as { agents?: AgentListItem[] } | null;
+      const result = (await this.plugin.gateway.request("agents.list", {})) as {
+        agents?: AgentListItem[];
+      } | null;
       const agentList: AgentListItem[] = result?.agents || [];
       if (agentList.length === 0) {
         agentList.push({ id: "main" });
@@ -1911,7 +2898,7 @@ class OpenClawChatView extends ItemView {
 
       // Set active agent
       const savedId = this.plugin.settings.activeAgentId;
-      const active = agents.find(a => a.id === savedId) || agents[0];
+      const active = agents.find((a) => a.id === savedId) || agents[0];
       if (active) {
         this.activeAgent = active;
         if (this.plugin.settings.activeAgentId !== active.id) {
@@ -1935,7 +2922,11 @@ class OpenClawChatView extends ItemView {
       const cfg = (raw?.config || raw || {}) as Record<string, unknown>;
       let parsed: Record<string, unknown> = cfg;
       if (raw && typeof raw.raw === "string") {
-        try { parsed = JSON.parse(raw.raw) as Record<string, unknown>; } catch { /* use cfg */ }
+        try {
+          parsed = JSON.parse(raw.raw) as Record<string, unknown>;
+        } catch {
+          /* use cfg */
+        }
       }
       const agents = parsed?.agents as Record<string, unknown> | undefined;
       const ad = (agents?.defaults || {}) as Record<string, unknown>;
@@ -1977,12 +2968,20 @@ class OpenClawChatView extends ItemView {
 
     for (const agent of this.agents) {
       const isActive = agent.id === this.activeAgent.id;
-      const item = this.profileDropdownEl.createDiv({ cls: `openclaw-agent-item${isActive ? " active" : ""}` });
-      item.createSpan({ text: agent.emoji || "🤖", cls: "openclaw-agent-item-emoji" });
+      const item = this.profileDropdownEl.createDiv({
+        cls: `openclaw-agent-item${isActive ? " active" : ""}`,
+      });
+      item.createSpan({
+        text: agent.emoji || "🤖",
+        cls: "openclaw-agent-item-emoji",
+      });
       const info = item.createDiv("openclaw-agent-item-info");
       info.createDiv({ text: agent.name, cls: "openclaw-agent-item-name" });
       if (agent.creature) {
-        info.createDiv({ text: agent.creature, cls: "openclaw-agent-item-sub" });
+        info.createDiv({
+          text: agent.creature,
+          cls: "openclaw-agent-item-sub",
+        });
       }
       if (!isActive) {
         item.addEventListener("click", () => {
@@ -1998,13 +2997,15 @@ class OpenClawChatView extends ItemView {
   async loadHistory(): Promise<void> {
     if (!this.plugin.gateway?.connected) return;
     try {
-      const result = await this.plugin.gateway.request("chat.history", {
+      const result = (await this.plugin.gateway.request("chat.history", {
         sessionKey: this.plugin.settings.sessionKey,
         limit: 200,
-      }) as { messages?: HistoryMessage[] } | null;
+      })) as { messages?: HistoryMessage[] } | null;
       if (result?.messages && Array.isArray(result.messages)) {
         this.messages = result.messages
-          .filter((m: HistoryMessage) => m.role === "user" || m.role === "assistant")
+          .filter(
+            (m: HistoryMessage) => m.role === "user" || m.role === "assistant",
+          )
           .map((m: HistoryMessage) => {
             const { text, images } = this.extractContent(m.content);
             return {
@@ -2015,7 +3016,11 @@ class OpenClawChatView extends ItemView {
               contentBlocks: Array.isArray(m.content) ? m.content : undefined,
             };
           })
-          .filter((m: ChatMessage) => (m.text.trim() || m.images.length > 0) && !m.text.startsWith("HEARTBEAT"));
+          .filter(
+            (m: ChatMessage) =>
+              (m.text.trim() || m.images.length > 0) &&
+              !m.text.startsWith("HEARTBEAT"),
+          );
 
         // Hide the first user message (typically the /new or /reset system prompt)
         if (this.messages.length > 0 && this.messages[0].role === "user") {
@@ -2032,7 +3037,10 @@ class OpenClawChatView extends ItemView {
     }
   }
 
-  private extractContent(content: string | ContentBlock[] | undefined): { text: string; images: string[] } {
+  private extractContent(content: string | ContentBlock[] | undefined): {
+    text: string;
+    images: string[];
+  } {
     let text = "";
     const images: string[] = [];
 
@@ -2049,7 +3057,8 @@ class OpenClawChatView extends ItemView {
             text += (text ? "\n" : "") + trContent;
           } else if (Array.isArray(trContent)) {
             for (const tc of trContent) {
-              if (tc?.type === "text" && tc.text) text += (text ? "\n" : "") + tc.text;
+              if (tc?.type === "text" && tc.text)
+                text += (text ? "\n" : "") + tc.text;
             }
           }
         } else if (c.type === "image_url" && c.image_url?.url) {
@@ -2059,7 +3068,8 @@ class OpenClawChatView extends ItemView {
     }
 
     // Extract vault image paths from "File saved at:" lines
-    const savedAtRegex = /File saved at:\s*(.+?openclaw-attachments\/[^\s\n]+)/g;
+    const savedAtRegex =
+      /File saved at:\s*(.+?openclaw-attachments\/[^\s\n]+)/g;
     let match;
     while ((match = savedAtRegex.exec(text)) !== null) {
       // Try to resolve as vault-relative path
@@ -2069,27 +3079,40 @@ class OpenClawChatView extends ItemView {
         : null;
       if (vaultRelative) {
         try {
-          const resourcePath = this.app.vault.adapter.getResourcePath(vaultRelative);
+          const resourcePath =
+            this.app.vault.adapter.getResourcePath(vaultRelative);
           if (resourcePath) images.push(resourcePath);
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
     }
 
     // Extract inline data URIs from text (legacy)
-    const dataUriRegex = /(?:^|\n)data:(image\/[^;]+);base64,[A-Za-z0-9+/=\n]+/g;
+    const dataUriRegex =
+      /(?:^|\n)data:(image\/[^;]+);base64,[A-Za-z0-9+/=\n]+/g;
     while ((match = dataUriRegex.exec(text)) !== null) {
       images.push(match[0].replace(/^\n/, "").trim());
     }
     // Remove data URIs from text display
-    text = text.replace(/\n?data:image\/[^;]+;base64,[A-Za-z0-9+/=\n]+/g, "").trim();
+    text = text
+      .replace(/\n?data:image\/[^;]+;base64,[A-Za-z0-9+/=\n]+/g, "")
+      .trim();
     // Strip [Attached image: ...] and "File saved at:" lines
     text = text.replace(/^\[Attached image:.*?\]\s*/gm, "").trim();
     text = text.replace(/^File saved at:.*$/gm, "").trim();
 
     // Strip gateway metadata blocks (Conversation info + JSON code block)
-    text = text.replace(/Conversation info \(untrusted metadata\):\s*```json[\s\S]*?```\s*/g, "").trim();
+    text = text
+      .replace(
+        /Conversation info \(untrusted metadata\):\s*```json[\s\S]*?```\s*/g,
+        "",
+      )
+      .trim();
     // Strip any remaining standalone metadata JSON blocks
-    text = text.replace(/^```json\s*\{\s*"message_id"[\s\S]*?```\s*/gm, "").trim();
+    text = text
+      .replace(/^```json\s*\{\s*"message_id"[\s\S]*?```\s*/gm, "")
+      .trim();
     // Strip timestamp prefixes like "[Sun 2026-02-22 21:58 GMT+7] "
     text = text.replace(/^\[.*?GMT[+-]\d+\]\s*/gm, "").trim();
     // Strip media attachment lines
@@ -2120,15 +3143,18 @@ class OpenClawChatView extends ItemView {
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus"
         : MediaRecorder.isTypeSupported("audio/webm")
-        ? "audio/webm"
-        : "";
+          ? "audio/webm"
+          : "";
 
-      this.mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+      this.mediaRecorder = new MediaRecorder(
+        stream,
+        mimeType ? { mimeType } : {},
+      );
       this.mediaRecorder.addEventListener("dataavailable", (e) => {
         if (e.data.size > 0) this.recordedChunks.push(e.data);
       });
       this.mediaRecorder.addEventListener("stop", () => {
-        stream.getTracks().forEach(t => t.stop());
+        stream.getTracks().forEach((t) => t.stop());
         void this.finishRecording();
       });
 
@@ -2153,14 +3179,17 @@ class OpenClawChatView extends ItemView {
 
   private async finishRecording(): Promise<void> {
     if (this.recordedChunks.length === 0) return;
-    const blob = new Blob(this.recordedChunks, { type: this.mediaRecorder?.mimeType || "audio/webm" });
+    const blob = new Blob(this.recordedChunks, {
+      type: this.mediaRecorder?.mimeType || "audio/webm",
+    });
     this.recordedChunks = [];
 
     // Convert to base64
     const arrayBuf = await blob.arrayBuffer();
     const bytes = new Uint8Array(arrayBuf);
     let binary = "";
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    for (let i = 0; i < bytes.length; i++)
+      binary += String.fromCharCode(bytes[i]);
     const b64 = btoa(binary);
     const mime = blob.type || "audio/webm";
 
@@ -2169,7 +3198,12 @@ class OpenClawChatView extends ItemView {
     const marker = `AUDIO_DATA:${mime};base64,${b64}`;
 
     // Show voice message in local UI
-    this.messages.push({ role: "user", text: "🎤 Voice message", images: [], timestamp: Date.now() });
+    this.messages.push({
+      role: "user",
+      text: "🎤 Voice message",
+      images: [],
+      timestamp: Date.now(),
+    });
     await this.renderMessages();
 
     // Send to gateway
@@ -2201,7 +3235,12 @@ class OpenClawChatView extends ItemView {
         idempotencyKey: runId,
       });
     } catch (e) {
-      this.messages.push({ role: "assistant", text: `Error: ${e}`, images: [], timestamp: Date.now() });
+      this.messages.push({
+        role: "assistant",
+        text: `Error: ${e}`,
+        images: [],
+        timestamp: Date.now(),
+      });
       this.streams.delete(sendSessionKey);
       this.runToSession.delete(runId);
       this.abortBtn.addClass("oc-hidden");
@@ -2226,14 +3265,21 @@ class OpenClawChatView extends ItemView {
 
     // Build attachments for gateway
     let fullMessage = text;
-    const displayText = text;
     const userImages: string[] = [];
-    const gatewayAttachments: { type: string; mimeType: string; content: string }[] = [];
+    const gatewayAttachments: {
+      type: string;
+      mimeType: string;
+      content: string;
+    }[] = [];
     if (this.pendingAttachments.length > 0) {
       for (const att of this.pendingAttachments) {
         if (att.base64 && att.mimeType) {
           // Image: send via attachments field (gateway saves to disk)
-          gatewayAttachments.push({ type: "image", mimeType: att.mimeType, content: att.base64 });
+          gatewayAttachments.push({
+            type: "image",
+            mimeType: att.mimeType,
+            content: att.base64,
+          });
           // Show preview in chat history
           userImages.push(`data:${att.mimeType};base64,${att.base64}`);
         } else {
@@ -2242,14 +3288,21 @@ class OpenClawChatView extends ItemView {
         }
       }
       if (!text) {
-        text = `📎 ${this.pendingAttachments.map(a => a.name).join(", ")}`;
+        text = `📎 ${this.pendingAttachments.map((a) => a.name).join(", ")}`;
         fullMessage = text;
       }
       this.pendingAttachments = [];
       this.attachPreviewEl.addClass("oc-hidden");
     }
 
-    this.messages.push({ role: "user", text: displayText || text, images: userImages, timestamp: Date.now() });
+    // Store the full message (incl. file blocks) locally so the just-sent
+    // bubble collapses attachments the same way reloaded history does.
+    this.messages.push({
+      role: "user",
+      text: fullMessage || text,
+      images: userImages,
+      timestamp: Date.now(),
+    });
     await this.renderMessages();
 
     const runId = generateId();
@@ -2283,7 +3336,8 @@ class OpenClawChatView extends ItemView {
         // Only update DOM if this session is still active tab
         if (this.activeSessionKey === sendSessionKey) {
           const tt = this.typingEl.querySelector(".openclaw-typing-text");
-          if (tt && tt.textContent === "Thinking") tt.textContent = "Still thinking";
+          if (tt && tt.textContent === "Thinking")
+            tt.textContent = "Still thinking";
         }
       }
     }, 15000);
@@ -2301,7 +3355,12 @@ class OpenClawChatView extends ItemView {
       await this.plugin.gateway.request("chat.send", sendParams);
     } catch (e) {
       if (ss.compactTimer) window.clearTimeout(ss.compactTimer);
-      this.messages.push({ role: "assistant", text: `Error: ${e}`, images: [], timestamp: Date.now() });
+      this.messages.push({
+        role: "assistant",
+        text: `Error: ${e}`,
+        images: [],
+        timestamp: Date.now(),
+      });
       this.streams.delete(sendSessionKey);
       this.runToSession.delete(runId);
       this.abortBtn.addClass("oc-hidden");
@@ -2328,22 +3387,36 @@ class OpenClawChatView extends ItemView {
   async updateContextMeter(): Promise<void> {
     if (!this.plugin.gateway?.connected) return;
     try {
-      const result = await this.plugin.gateway.request("sessions.list", {}) as { sessions?: SessionInfo[] } | null;
+      const result = (await this.plugin.gateway.request(
+        "sessions.list",
+        {},
+      )) as { sessions?: SessionInfo[] } | null;
       const sessions: SessionInfo[] = result?.sessions || [];
       // Find session matching current sessionKey (try exact match, then with agent prefix)
       const sk = this.plugin.settings.sessionKey || "main";
-      const session = sessions.find((s: SessionInfo) => s.key === sk) ||
-        sessions.find((s: SessionInfo) => s.key === `${this.agentPrefix}${sk}`) ||
+      const session =
+        sessions.find((s: SessionInfo) => s.key === sk) ||
+        sessions.find(
+          (s: SessionInfo) => s.key === `${this.agentPrefix}${sk}`,
+        ) ||
         sessions.find((s: SessionInfo) => s.key.endsWith(`:${sk}`));
       if (!session) return;
       const used = session.totalTokens || 0;
       const max = session.contextTokens || 200000;
       const pct = Math.min(100, Math.round((used / max) * 100));
       this.contextFillEl.setCssStyles({ width: pct + "%" });
-      this.contextFillEl.className = "openclaw-context-fill" + (pct > 80 ? " openclaw-context-high" : pct > 60 ? " openclaw-context-mid" : "");
+      this.contextFillEl.className =
+        "openclaw-context-fill" +
+        (pct > 80
+          ? " openclaw-context-high"
+          : pct > 60
+            ? " openclaw-context-mid"
+            : "");
       this.contextLabelEl.textContent = `${pct}%`;
       // Update active tab meter bar
-      const activeFill = this.tabBarEl?.querySelector(".openclaw-tab.active .openclaw-tab-meter-fill") as HTMLElement;
+      const activeFill = this.tabBarEl?.querySelector(
+        ".openclaw-tab.active .openclaw-tab-meter-fill",
+      ) as HTMLElement;
       if (activeFill) activeFill.setCssStyles({ width: pct + "%" });
       // Update model label from session data (but don't overwrite a recent manual switch)
       const fullModel = session.model || "";
@@ -2353,7 +3426,10 @@ class OpenClawChatView extends ItemView {
         this.updateModelPill();
       }
       // Update session display name from gateway
-      if (session.displayName && session.displayName !== this.cachedSessionDisplayName) {
+      if (
+        session.displayName &&
+        session.displayName !== this.cachedSessionDisplayName
+      ) {
         this.cachedSessionDisplayName = session.displayName;
       }
       // Update bar controls (thinking/show steps) from session data
@@ -2361,15 +3437,19 @@ class OpenClawChatView extends ItemView {
       // Detect session list changes and re-render tabs when needed
       const agentPrefix = this.agentPrefix;
       const currentSessionKeys = new Set(
-        sessions.filter((s: SessionInfo) => {
-          if (!s.key.startsWith(agentPrefix)) return false;
-          const suffix = s.key.slice(agentPrefix.length);
-          return !suffix.includes(":");
-        }).map((s: SessionInfo) => s.key)
+        sessions
+          .filter((s: SessionInfo) => {
+            if (!s.key.startsWith(agentPrefix)) return false;
+            const suffix = s.key.slice(agentPrefix.length);
+            return !suffix.includes(":");
+          })
+          .map((s: SessionInfo) => s.key),
       );
-      const trackedKeys = new Set(this.tabSessions.map(t => `${agentPrefix}${t.key}`));
-      const added = [...currentSessionKeys].some(k => !trackedKeys.has(k));
-      const removed = [...trackedKeys].some(k => !currentSessionKeys.has(k));
+      const trackedKeys = new Set(
+        this.tabSessions.map((t) => `${agentPrefix}${t.key}`),
+      );
+      const added = [...currentSessionKeys].some((k) => !trackedKeys.has(k));
+      const removed = [...trackedKeys].some((k) => !currentSessionKeys.has(k));
       if ((added || removed) && !this.tabDeleteInProgress) {
         // If viewing a session that no longer exists, switch back to main
         if (removed && !currentSessionKeys.has(`${agentPrefix}${sk}`)) {
@@ -2382,20 +3462,33 @@ class OpenClawChatView extends ItemView {
         }
         await this.renderTabs();
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   updateModelPill(): void {
-    const model = this.currentModel ? this.shortModelName(this.currentModel) : "model";
+    const model = this.currentModel
+      ? this.shortModelName(this.currentModel)
+      : "model";
     if (this.modelLabelEl) {
       this.modelLabelEl.empty();
-      this.modelLabelEl.createSpan({ text: model, cls: "openclaw-ctx-pill-text" });
-      this.modelLabelEl.createSpan({ text: " ▾", cls: "openclaw-ctx-pill-arrow" });
+      this.modelLabelEl.createSpan({
+        text: model,
+        cls: "openclaw-ctx-pill-text",
+      });
+      this.modelLabelEl.createSpan({
+        text: " ▾",
+        cls: "openclaw-ctx-pill-arrow",
+      });
     }
     if (this.brainBtnEl) {
       this.brainBtnEl.empty();
       this.brainBtnEl.appendText(model);
-      this.brainBtnEl.createSpan({ text: " ▾", cls: "openclaw-brain-btn-arrow" });
+      this.brainBtnEl.createSpan({
+        text: " ▾",
+        cls: "openclaw-brain-btn-arrow",
+      });
     }
   }
 
@@ -2407,20 +3500,26 @@ class OpenClawChatView extends ItemView {
 
   updateBarControls(): void {
     if (this.thinkChipEl) {
-      const label = this.thinkingLevel || this.barControlDefaultLabel(this.thinkingDefault);
+      const label =
+        this.thinkingLevel || this.barControlDefaultLabel(this.thinkingDefault);
       this.thinkChipEl.textContent = "think: " + label;
       this.thinkChipEl.toggleClass("oc-bar-chip-active", !!this.thinkingLevel);
     }
     if (this.verboseChipEl) {
-      const label = this.verboseLevel || this.barControlDefaultLabel(this.verboseDefault);
+      const label =
+        this.verboseLevel || this.barControlDefaultLabel(this.verboseDefault);
       this.verboseChipEl.textContent = "show steps: " + label;
       this.verboseChipEl.toggleClass("oc-bar-chip-active", !!this.verboseLevel);
     }
   }
 
-  private async cycleBarControl(field: "thinkingLevel" | "verboseLevel", cycle: string[]): Promise<void> {
+  private async cycleBarControl(
+    field: "thinkingLevel" | "verboseLevel",
+    cycle: string[],
+  ): Promise<void> {
     if (!this.plugin.gateway?.connected) return;
-    const current = field === "thinkingLevel" ? this.thinkingLevel : this.verboseLevel;
+    const current =
+      field === "thinkingLevel" ? this.thinkingLevel : this.verboseLevel;
     const idx = cycle.indexOf(current);
     const next = cycle[(idx + 1) % cycle.length];
     const patch: Record<string, string | null> = {};
@@ -2434,7 +3533,9 @@ class OpenClawChatView extends ItemView {
       else this.verboseLevel = next;
       this.updateBarControls();
     } catch (err: unknown) {
-      new Notice(`Failed to update ${field}: ${err instanceof Error ? err.message : String(err)}`);
+      new Notice(
+        `Failed to update ${field}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -2472,14 +3573,17 @@ class OpenClawChatView extends ItemView {
 
   private renderMobileTabSwitcher(): void {
     const currentKey = this.plugin.settings.sessionKey || "main";
-    const currentIdx = this.tabSessions.findIndex(t => t.key === currentKey);
-    const current = currentIdx >= 0 ? this.tabSessions[currentIdx] : this.tabSessions[0];
+    const currentIdx = this.tabSessions.findIndex((t) => t.key === currentKey);
+    const current =
+      currentIdx >= 0 ? this.tabSessions[currentIdx] : this.tabSessions[0];
     const isHome = current.key === "main";
 
     // Label
     if (isHome) {
       this.tabSwitcherLabelEl.empty();
-      createSvgIcon(this.tabSwitcherLabelEl, SVG_HOME_16, { style: "vertical-align:-3px;opacity:0.7" });
+      createSvgIcon(this.tabSwitcherLabelEl, SVG_HOME_16, {
+        style: "vertical-align:-3px;opacity:0.7",
+      });
       this.tabSwitcherLabelEl.title = "";
       this.tabSwitcherLabelEl.removeClass("oc-cursor-default");
       this.tabSwitcherLabelEl.ondblclick = null;
@@ -2494,7 +3598,9 @@ class OpenClawChatView extends ItemView {
     }
 
     // Meter
-    this.tabSwitcherMeterFillEl.setCssProps({ "--oc-meter-width": (current.pct || 0) + "%" });
+    this.tabSwitcherMeterFillEl.setCssProps({
+      "--oc-meter-width": (current.pct || 0) + "%",
+    });
 
     // Minimal mobile header: hide arrows
     this.tabArrowLeftEl.addClass("oc-hidden");
@@ -2504,7 +3610,11 @@ class OpenClawChatView extends ItemView {
     this.tabSwitcherActionsEl.empty();
   }
 
-  private startSwitcherRename(tab: { key: string; label: string; pct: number }): void {
+  private startSwitcherRename(tab: {
+    key: string;
+    label: string;
+    pct: number;
+  }): void {
     const input = createEl("input");
     input.type = "text";
     input.value = tab.label;
@@ -2523,14 +3633,22 @@ class OpenClawChatView extends ItemView {
             label: newName,
           });
           tab.label = newName;
-        } catch { /* keep old name */ }
+        } catch {
+          /* keep old name */
+        }
       }
       void this.renderTabs();
       this.renderMobileTabSwitcher();
     };
     input.addEventListener("keydown", (ev: KeyboardEvent) => {
-      if (ev.key === "Enter") { ev.preventDefault(); void finish(true); }
-      if (ev.key === "Escape") { ev.preventDefault(); void finish(false); }
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        void finish(true);
+      }
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        void finish(false);
+      }
       ev.stopPropagation();
     });
     input.addEventListener("blur", () => void finish(true));
@@ -2544,12 +3662,16 @@ class OpenClawChatView extends ItemView {
     for (const tab of this.tabSessions) {
       const isHome = tab.key === "main";
       const isCurrent = tab.key === currentKey;
-      const item = this.hamburgerDropdownEl2.createDiv({ cls: `oc-hamburger-dropdown-item${isCurrent ? " oc-active" : ""}` });
+      const item = this.hamburgerDropdownEl2.createDiv({
+        cls: `oc-hamburger-dropdown-item${isCurrent ? " oc-active" : ""}`,
+      });
 
       // Label
       const label = item.createSpan({ cls: "oc-dd-label" });
       if (isHome) {
-        createSvgIcon(label, SVG_HOME_16, { style: "vertical-align:-3px;opacity:0.7" });
+        createSvgIcon(label, SVG_HOME_16, {
+          style: "vertical-align:-3px;opacity:0.7",
+        });
         label.appendText(" Home");
       } else {
         label.textContent = tab.label;
@@ -2580,7 +3702,10 @@ class OpenClawChatView extends ItemView {
 
       // Close (real or spacer)
       if (!isHome) {
-        const closeBtn = actions.createSpan({ text: "×", cls: "oc-dd-action-btn oc-dd-action-close" });
+        const closeBtn = actions.createSpan({
+          text: "×",
+          cls: "oc-dd-action-btn oc-dd-action-close",
+        });
         closeBtn.title = "Close tab";
         closeBtn.addEventListener("click", (e) => {
           e.stopPropagation();
@@ -2588,7 +3713,10 @@ class OpenClawChatView extends ItemView {
           void this.closeTabAction(tab);
         });
       } else {
-        actions.createSpan({ text: "×", cls: "oc-dd-action-btn oc-visibility-hidden" });
+        actions.createSpan({
+          text: "×",
+          cls: "oc-dd-action-btn oc-visibility-hidden",
+        });
       }
 
       // Click to switch
@@ -2599,7 +3727,9 @@ class OpenClawChatView extends ItemView {
     }
 
     // + New Tab
-    const addItem = this.hamburgerDropdownEl2.createDiv({ cls: "oc-hamburger-dropdown-item oc-justify-center oc-text-muted oc-opacity-07" });
+    const addItem = this.hamburgerDropdownEl2.createDiv({
+      cls: "oc-hamburger-dropdown-item oc-justify-center oc-text-muted oc-opacity-07",
+    });
     addItem.createSpan({ text: "+ New Tab" });
     addItem.addEventListener("click", () => {
       this.hamburgerDropdownEl2.removeClass("oc-open");
@@ -2607,7 +3737,10 @@ class OpenClawChatView extends ItemView {
     });
   }
 
-  private startDropdownRename(labelEl: HTMLElement, tab: { key: string; label: string; pct: number }): void {
+  private startDropdownRename(
+    labelEl: HTMLElement,
+    tab: { key: string; label: string; pct: number },
+  ): void {
     const input = createEl("input", { cls: "oc-dd-rename-input" });
     input.value = tab.label;
     input.maxLength = 30;
@@ -2624,15 +3757,23 @@ class OpenClawChatView extends ItemView {
             label: newName,
           });
           tab.label = newName;
-        } catch { /* keep old name */ }
+        } catch {
+          /* keep old name */
+        }
       }
       labelEl.textContent = tab.label;
       void this.renderTabs();
       this.renderMobileTabSwitcher();
     };
     input.addEventListener("keydown", (ev: KeyboardEvent) => {
-      if (ev.key === "Enter") { ev.preventDefault(); void finish(true); }
-      if (ev.key === "Escape") { ev.preventDefault(); void finish(false); }
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        void finish(true);
+      }
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        void finish(false);
+      }
       ev.stopPropagation();
     });
     input.addEventListener("blur", () => void finish(true));
@@ -2644,7 +3785,10 @@ class OpenClawChatView extends ItemView {
       // Show loading indicator
       if (this.isMobileMode && this.tabSwitcherLabelEl) {
         this.tabSwitcherLabelEl.empty();
-        this.tabSwitcherLabelEl.createSpan({ cls: "oc-tab-loading-spinner", text: "⟳" });
+        this.tabSwitcherLabelEl.createSpan({
+          cls: "oc-tab-loading-spinner",
+          text: "⟳",
+        });
         this.tabSwitcherLabelEl.createSpan({ text: " Loading..." });
       }
       this.streamEl = null;
@@ -2664,13 +3808,20 @@ class OpenClawChatView extends ItemView {
     })();
   }
 
-  private async resetTabAction(tab: { key: string; label: string; pct: number }): Promise<void> {
+  private async resetTabAction(tab: {
+    key: string;
+    label: string;
+    pct: number;
+  }): Promise<void> {
     if (!this.plugin.gateway?.connected) return;
     const currentKey = this.plugin.settings.sessionKey || "main";
     const isHome = tab.key === "main";
     const title = isHome ? "Reset Home tab?" : `Reset "${tab.label}"?`;
     if (!this.isCloseConfirmDisabled()) {
-      const confirmed = await this.confirmTabClose(title, "This will clear the conversation.");
+      const confirmed = await this.confirmTabClose(
+        title,
+        "This will clear the conversation.",
+      );
       if (!confirmed) return;
     }
     try {
@@ -2688,23 +3839,39 @@ class OpenClawChatView extends ItemView {
       await this.updateContextMeter();
       await this.renderTabs();
     } catch (err: unknown) {
-      new Notice(`Reset failed: ${err instanceof Error ? err.message : String(err)}`);
+      new Notice(
+        `Reset failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
-  private async closeTabAction(tab: { key: string; label: string; pct: number }): Promise<void> {
+  private async closeTabAction(tab: {
+    key: string;
+    label: string;
+    pct: number;
+  }): Promise<void> {
     if (!this.plugin.gateway?.connected || this.tabDeleteInProgress) return;
     const currentKey = this.plugin.settings.sessionKey || "main";
     if (!this.isCloseConfirmDisabled()) {
-      const confirmed = await this.confirmTabClose("Close tab?", `Close "${tab.label}"? Chat history will be lost.`);
+      const confirmed = await this.confirmTabClose(
+        "Close tab?",
+        `Close "${tab.label}"? Chat history will be lost.`,
+      );
       if (!confirmed) return;
     }
     this.tabDeleteInProgress = true;
     try {
-      const deleted = await deleteSessionWithFallback(this.plugin.gateway, `${this.agentPrefix}${tab.key}`);
-      new Notice(deleted ? `Closed: ${tab.label}` : `Could not delete: ${tab.label}`);
+      const deleted = await deleteSessionWithFallback(
+        this.plugin.gateway,
+        `${this.agentPrefix}${tab.key}`,
+      );
+      new Notice(
+        deleted ? `Closed: ${tab.label}` : `Could not delete: ${tab.label}`,
+      );
     } catch (err: unknown) {
-      new Notice(`Close failed: ${err instanceof Error ? err.message : String(err)}`);
+      new Notice(
+        `Close failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
     this.finishStream(tab.key);
     if (tab.key === currentKey) {
@@ -2721,7 +3888,7 @@ class OpenClawChatView extends ItemView {
   }
 
   private async createNewTabAction(): Promise<void> {
-    const existingKeys = new Set(this.tabSessions.map(t => t.key));
+    const existingKeys = new Set(this.tabSessions.map((t) => t.key));
     let nextNum = 1;
     while (existingKeys.has(`tab-${nextNum}`)) nextNum++;
     const sessionKey = `tab-${nextNum}`;
@@ -2746,7 +3913,11 @@ class OpenClawChatView extends ItemView {
   async renderTabs(): Promise<void> {
     if (!this.tabBarEl || this.renderingTabs) return;
     this.renderingTabs = true;
-    try { await this._renderTabsInner(); } finally { this.renderingTabs = false; }
+    try {
+      await this._renderTabsInner();
+    } finally {
+      this.renderingTabs = false;
+    }
   }
 
   private async _renderTabsInner(): Promise<void> {
@@ -2757,16 +3928,21 @@ class OpenClawChatView extends ItemView {
     let sessions: SessionInfo[] = [];
     if (this.plugin.gateway?.connected) {
       try {
-        const result = await this.plugin.gateway.request("sessions.list", {}) as { sessions?: SessionInfo[] } | null;
+        const result = (await this.plugin.gateway.request(
+          "sessions.list",
+          {},
+        )) as { sessions?: SessionInfo[] } | null;
         sessions = result?.sessions || [];
-      } catch { /* use empty */ }
+      } catch {
+        /* use empty */
+      }
     }
 
     // Filter: only show user conversation sessions (suffix has no colons)
     // This excludes channel sessions (telegram:, discord:, webchat:, etc.),
     // cron jobs, and sub-agents — all of which have colons in their suffix.
     const agentPrefix = this.agentPrefix;
-    const convSessions = sessions.filter(s => {
+    const convSessions = sessions.filter((s) => {
       if (!s.key.startsWith(agentPrefix)) return false;
       const suffix = s.key.slice(agentPrefix.length);
       return !suffix.includes(":");
@@ -2774,30 +3950,43 @@ class OpenClawChatView extends ItemView {
 
     // Build tab list — ensure "main" is always first
     this.tabSessions = [];
-    const mainSession = convSessions.find(s => s.key === `${this.agentPrefix}main`);
+    const mainSession = convSessions.find(
+      (s) => s.key === `${this.agentPrefix}main`,
+    );
     if (mainSession) {
       const used = mainSession.totalTokens || 0;
       const max = mainSession.contextTokens || 200000;
-      this.tabSessions.push({ key: "main", label: "Home", pct: Math.min(100, Math.round((used / max) * 100)) });
+      this.tabSessions.push({
+        key: "main",
+        label: "Home",
+        pct: Math.min(100, Math.round((used / max) * 100)),
+      });
     } else {
       this.tabSessions.push({ key: "main", label: "Home", pct: 0 });
     }
 
     // Add other sessions in creation order (oldest first), then apply saved order
     const others = convSessions
-      .filter(s => s.key.slice(agentPrefix.length) !== "main")
-      .sort((a, b) => (a.createdAt || a.updatedAt || 0) - (b.createdAt || b.updatedAt || 0));
+      .filter((s) => s.key.slice(agentPrefix.length) !== "main")
+      .sort(
+        (a, b) =>
+          (a.createdAt || a.updatedAt || 0) - (b.createdAt || b.updatedAt || 0),
+      );
 
     const savedOrder = this.plugin.settings.tabOrder || [];
     if (savedOrder.length > 0) {
-      const orderMap = new Map(savedOrder.map((k: string, i: number) => [k, i]));
+      const orderMap = new Map(
+        savedOrder.map((k: string, i: number) => [k, i]),
+      );
       others.sort((a, b) => {
         const skA = a.key.slice(agentPrefix.length);
         const skB = b.key.slice(agentPrefix.length);
         const oA = orderMap.has(skA) ? orderMap.get(skA)! : 9999;
         const oB = orderMap.has(skB) ? orderMap.get(skB)! : 9999;
         if (oA !== oB) return oA - oB;
-        return (a.createdAt || a.updatedAt || 0) - (b.createdAt || b.updatedAt || 0);
+        return (
+          (a.createdAt || a.updatedAt || 0) - (b.createdAt || b.updatedAt || 0)
+        );
       });
     }
 
@@ -2845,15 +4034,23 @@ class OpenClawChatView extends ItemView {
                   label: newName,
                 });
                 tab.label = newName;
-              } catch { /* keep old name */ }
+              } catch {
+                /* keep old name */
+              }
             }
             input.replaceWith(labelSpan);
             labelSpan.textContent = tab.label;
             void this.renderTabs();
           };
           input.addEventListener("keydown", (ev: KeyboardEvent) => {
-            if (ev.key === "Enter") { ev.preventDefault(); void finish(true); }
-            if (ev.key === "Escape") { ev.preventDefault(); void finish(false); }
+            if (ev.key === "Enter") {
+              ev.preventDefault();
+              void finish(true);
+            }
+            if (ev.key === "Escape") {
+              ev.preventDefault();
+              void finish(false);
+            }
           });
           input.addEventListener("blur", () => void finish(true));
         });
@@ -2865,89 +4062,128 @@ class OpenClawChatView extends ItemView {
         const resetBtn = row.createSpan({ cls: "openclaw-tab-close" });
         createSvgIcon(resetBtn, SVG_RESET_11, { style: "vertical-align:-1px" });
         resetBtn.title = "Reset conversation";
-        resetBtn.addEventListener("click", (e) => { e.stopPropagation(); void (async () => {
-          if (!this.plugin.gateway?.connected) return;
-          // Confirm before reset
-          if (!this.isCloseConfirmDisabled()) {
-            const confirmed = await this.confirmTabClose("Reset Home tab?", "This will clear the conversation.");
-            if (!confirmed) return;
-          }
-          try {
-            await this.plugin.gateway.request("chat.send", {
-              sessionKey: tab.key,
-              message: "/reset",
-              deliver: false,
-              idempotencyKey: "reset-" + Date.now(),
-            });
-            new Notice("Home tab reset");
-            if (tab.key === currentKey) {
-              this.messages = [];
-              this.messagesEl.empty();
+        resetBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          void (async () => {
+            if (!this.plugin.gateway?.connected) return;
+            // Confirm before reset
+            if (!this.isCloseConfirmDisabled()) {
+              const confirmed = await this.confirmTabClose(
+                "Reset Home tab?",
+                "This will clear the conversation.",
+              );
+              if (!confirmed) return;
             }
-            await this.updateContextMeter();
-            await this.renderTabs();
-          } catch (err: unknown) {
-            new Notice(`Reset failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        })(); });
+            try {
+              await this.plugin.gateway.request("chat.send", {
+                sessionKey: tab.key,
+                message: "/reset",
+                deliver: false,
+                idempotencyKey: "reset-" + Date.now(),
+              });
+              new Notice("Home tab reset");
+              if (tab.key === currentKey) {
+                this.messages = [];
+                this.messagesEl.empty();
+              }
+              await this.updateContextMeter();
+              await this.renderTabs();
+            } catch (err: unknown) {
+              new Notice(
+                `Reset failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          })();
+        });
       } else {
         // Other tabs: reset button (↻) + close button (×)
-        const tabResetBtn = row.createSpan({ cls: "openclaw-tab-close openclaw-tab-reset" });
-        createSvgIcon(tabResetBtn, SVG_RESET_10, { style: "vertical-align:-1px" });
+        const tabResetBtn = row.createSpan({
+          cls: "openclaw-tab-close openclaw-tab-reset",
+        });
+        createSvgIcon(tabResetBtn, SVG_RESET_10, {
+          style: "vertical-align:-1px",
+        });
         tabResetBtn.title = "Reset conversation";
-        tabResetBtn.addEventListener("click", (e) => { e.stopPropagation(); void (async () => {
-          if (!this.plugin.gateway?.connected) return;
-          if (!this.isCloseConfirmDisabled()) {
-            const confirmed = await this.confirmTabClose(`Reset "${tab.label}"?`, "This will clear the conversation.");
-            if (!confirmed) return;
-          }
-          try {
-            await this.plugin.gateway.request("chat.send", {
-              sessionKey: tab.key,
-              message: "/reset",
-              deliver: false,
-              idempotencyKey: "reset-" + Date.now(),
-            });
-            new Notice(`Reset: ${tab.label}`);
+        tabResetBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          void (async () => {
+            if (!this.plugin.gateway?.connected) return;
+            if (!this.isCloseConfirmDisabled()) {
+              const confirmed = await this.confirmTabClose(
+                `Reset "${tab.label}"?`,
+                "This will clear the conversation.",
+              );
+              if (!confirmed) return;
+            }
+            try {
+              await this.plugin.gateway.request("chat.send", {
+                sessionKey: tab.key,
+                message: "/reset",
+                deliver: false,
+                idempotencyKey: "reset-" + Date.now(),
+              });
+              new Notice(`Reset: ${tab.label}`);
+              if (tab.key === currentKey) {
+                this.messages = [];
+                this.messagesEl.empty();
+              }
+              await this.updateContextMeter();
+              await this.renderTabs();
+            } catch (err: unknown) {
+              new Notice(
+                `Reset failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          })();
+        });
+
+        const tabCloseBtn = row.createSpan({
+          text: "×",
+          cls: "openclaw-tab-close",
+        });
+        tabCloseBtn.title = "Close tab";
+        tabCloseBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          void (async () => {
+            if (!this.plugin.gateway?.connected || this.tabDeleteInProgress)
+              return;
+            if (!this.isCloseConfirmDisabled()) {
+              const confirmed = await this.confirmTabClose(
+                "Close tab?",
+                `Close "${tab.label}"? Chat history will be lost.`,
+              );
+              if (!confirmed) return;
+            }
+            this.tabDeleteInProgress = true;
+            try {
+              const deleted = await deleteSessionWithFallback(
+                this.plugin.gateway,
+                `${this.agentPrefix}${tab.key}`,
+              );
+              new Notice(
+                deleted
+                  ? `Closed: ${tab.label}`
+                  : `Could not delete: ${tab.label}`,
+              );
+            } catch (err: unknown) {
+              new Notice(
+                `Close failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+            this.finishStream(tab.key);
             if (tab.key === currentKey) {
+              this.plugin.settings.sessionKey = "main";
+              await this.plugin.saveSettings();
               this.messages = [];
               this.messagesEl.empty();
+              await this.loadHistory();
+              this.restoreStreamUI();
             }
-            await this.updateContextMeter();
+            this.tabDeleteInProgress = false;
             await this.renderTabs();
-          } catch (err: unknown) {
-            new Notice(`Reset failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        })(); });
-
-        const tabCloseBtn = row.createSpan({ text: "×", cls: "openclaw-tab-close" });
-        tabCloseBtn.title = "Close tab";
-        tabCloseBtn.addEventListener("click", (e) => { e.stopPropagation(); void (async () => {
-          if (!this.plugin.gateway?.connected || this.tabDeleteInProgress) return;
-          if (!this.isCloseConfirmDisabled()) {
-            const confirmed = await this.confirmTabClose("Close tab?", `Close "${tab.label}"? Chat history will be lost.`);
-            if (!confirmed) return;
-          }
-          this.tabDeleteInProgress = true;
-          try {
-            const deleted = await deleteSessionWithFallback(this.plugin.gateway, `${this.agentPrefix}${tab.key}`);
-            new Notice(deleted ? `Closed: ${tab.label}` : `Could not delete: ${tab.label}`);
-          } catch (err: unknown) {
-            new Notice(`Close failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-          this.finishStream(tab.key);
-          if (tab.key === currentKey) {
-            this.plugin.settings.sessionKey = "main";
-            await this.plugin.saveSettings();
-            this.messages = [];
-            this.messagesEl.empty();
-            await this.loadHistory();
-            this.restoreStreamUI();
-          }
-          this.tabDeleteInProgress = false;
-          await this.renderTabs();
-          await this.updateContextMeter();
-        })(); });
+            await this.updateContextMeter();
+          })();
+        });
       }
 
       // Progress bar (gray container, black fill)
@@ -2964,7 +4200,11 @@ class OpenClawChatView extends ItemView {
         });
         tabEl.addEventListener("dragend", () => {
           tabEl.removeClass("oc-dragging");
-          this.tabBarEl.querySelectorAll(".oc-drag-over").forEach((el: Element) => (el as HTMLElement).classList.remove("oc-drag-over"));
+          this.tabBarEl
+            .querySelectorAll(".oc-drag-over")
+            .forEach((el: Element) =>
+              (el as HTMLElement).classList.remove("oc-drag-over"),
+            );
         });
         tabEl.addEventListener("dragover", (e: DragEvent) => {
           e.preventDefault();
@@ -2985,71 +4225,86 @@ class OpenClawChatView extends ItemView {
 
       // Click to switch
       if (!isCurrent) {
-        tabEl.addEventListener("click", () => void (async () => {
-          // Clear DOM from old tab
-          this.streamEl = null;
-          this.typingEl.addClass("oc-hidden");
-          this.abortBtn.addClass("oc-hidden");
-          this.hideBanner();
+        tabEl.addEventListener(
+          "click",
+          () =>
+            void (async () => {
+              // Clear DOM from old tab
+              this.streamEl = null;
+              this.typingEl.addClass("oc-hidden");
+              this.abortBtn.addClass("oc-hidden");
+              this.hideBanner();
 
-          this.plugin.settings.sessionKey = tab.key;
-          await this.plugin.saveSettings();
-          this.messages = [];
-          this.messagesEl.empty();
-          this.cachedSessionDisplayName = tab.label;
-          await this.loadHistory();
+              this.plugin.settings.sessionKey = tab.key;
+              await this.plugin.saveSettings();
+              this.messages = [];
+              this.messagesEl.empty();
+              this.cachedSessionDisplayName = tab.label;
+              await this.loadHistory();
 
-          // Restore stream UI if new tab has an active stream
-          this.restoreStreamUI();
+              // Restore stream UI if new tab has an active stream
+              this.restoreStreamUI();
 
-          await this.updateContextMeter();
-          void this.renderTabs();
-          this.updateStatus();
-        })());
+              await this.updateContextMeter();
+              void this.renderTabs();
+              this.updateStatus();
+            })(),
+        );
       }
     }
 
     // + button to add new tab
-    const addBtn = this.tabBarEl.createDiv({ cls: "openclaw-tab openclaw-tab-add" });
+    const addBtn = this.tabBarEl.createDiv({
+      cls: "openclaw-tab openclaw-tab-add",
+    });
     addBtn.createSpan({ text: "+", cls: "openclaw-tab-label" });
-    addBtn.addEventListener("click", () => void (async () => {
-      // Find next available session key (collision-free, based on keys not labels)
-      const existingKeys = new Set(this.tabSessions.map(t => t.key));
-      let nextNum = 1;
-      while (existingKeys.has(`tab-${nextNum}`)) nextNum++;
-      const sessionKey = `tab-${nextNum}`;
-      try {
-        await this.plugin.gateway?.request("chat.send", {
-          sessionKey: sessionKey,
-          message: "/new",
-          deliver: false,
-          idempotencyKey: "newtab-" + Date.now(),
-        });
-        await new Promise(r => window.setTimeout(r, 500));
-        try {
-          await this.plugin.gateway?.request("sessions.patch", {
-            key: `${this.agentPrefix}${sessionKey}`,
-            label: "Untitled",
-          });
-        } catch { /* label optional */ }
-        // Switch to it - clear old tab's stream UI
-        this.streamEl = null;
-        this.typingEl.addClass("oc-hidden");
-        this.abortBtn.addClass("oc-hidden");
-        this.hideBanner();
+    addBtn.addEventListener(
+      "click",
+      () =>
+        void (async () => {
+          // Find next available session key (collision-free, based on keys not labels)
+          const existingKeys = new Set(this.tabSessions.map((t) => t.key));
+          let nextNum = 1;
+          while (existingKeys.has(`tab-${nextNum}`)) nextNum++;
+          const sessionKey = `tab-${nextNum}`;
+          try {
+            await this.plugin.gateway?.request("chat.send", {
+              sessionKey: sessionKey,
+              message: "/new",
+              deliver: false,
+              idempotencyKey: "newtab-" + Date.now(),
+            });
+            await new Promise((r) => window.setTimeout(r, 500));
+            try {
+              await this.plugin.gateway?.request("sessions.patch", {
+                key: `${this.agentPrefix}${sessionKey}`,
+                label: "Untitled",
+              });
+            } catch {
+              /* label optional */
+            }
+            // Switch to it - clear old tab's stream UI
+            this.streamEl = null;
+            this.typingEl.addClass("oc-hidden");
+            this.abortBtn.addClass("oc-hidden");
+            this.hideBanner();
 
-        this.plugin.settings.sessionKey = sessionKey;
-        this.messages = [];
-        if (this.plugin.settings.streamItemsMap) this.plugin.settings.streamItemsMap = {};
-        await this.plugin.saveSettings();
-        this.messagesEl.empty();
-        await this.renderTabs();
-        await this.updateContextMeter();
-        new Notice("New tab");
-      } catch (err: unknown) {
-        new Notice(`Failed to create tab: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    })());
+            this.plugin.settings.sessionKey = sessionKey;
+            this.messages = [];
+            if (this.plugin.settings.streamItemsMap)
+              this.plugin.settings.streamItemsMap = {};
+            await this.plugin.saveSettings();
+            this.messagesEl.empty();
+            await this.renderTabs();
+            await this.updateContextMeter();
+            new Notice("New tab");
+          } catch (err: unknown) {
+            new Notice(
+              `Failed to create tab: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        })(),
+    );
 
     // Check if mobile mode needed
     this.updateTabMode();
@@ -3062,13 +4317,18 @@ class OpenClawChatView extends ItemView {
   }
 
   private confirmTabClose(title: string, msg: string): Promise<boolean> {
-    return new Promise(resolve => {
-      const modal = new ConfirmCloseModal(this.app, title, msg, (result, dontAsk) => {
-        if (result && dontAsk) {
-          this.plugin.setCloseConfirmDisabled(true);
-        }
-        resolve(result);
-      });
+    return new Promise((resolve) => {
+      const modal = new ConfirmCloseModal(
+        this.app,
+        title,
+        msg,
+        (result, dontAsk) => {
+          if (result && dontAsk) {
+            this.plugin.setCloseConfirmDisabled(true);
+          }
+          resolve(result);
+        },
+      );
       modal.open();
     });
   }
@@ -3079,28 +4339,40 @@ class OpenClawChatView extends ItemView {
     let touchStartY = 0;
     let pulling = false;
 
-    this.messagesEl.addEventListener("touchstart", (e: TouchEvent) => {
-      touchStartY = e.touches[0].clientY;
-      pulling = false;
-    }, { passive: true });
-
-    this.messagesEl.addEventListener("touchmove", (e: TouchEvent) => {
-      const deltaY = e.touches[0].clientY - touchStartY;
-      if (this.messagesEl.scrollTop <= 0 && deltaY > 60) {
-        pulling = true;
-      }
-    }, { passive: true });
-
-    this.messagesEl.addEventListener("touchend", () => {
-      // Pull-to-refresh
-      if (pulling) {
+    this.messagesEl.addEventListener(
+      "touchstart",
+      (e: TouchEvent) => {
+        touchStartY = e.touches[0].clientY;
         pulling = false;
-        this.messages = [];
-        this.messagesEl.empty();
-        void this.loadHistory().then(() => this.updateContextMeter());
-        new Notice("Refreshed");
-      }
-    }, { passive: true });
+      },
+      { passive: true },
+    );
+
+    this.messagesEl.addEventListener(
+      "touchmove",
+      (e: TouchEvent) => {
+        const deltaY = e.touches[0].clientY - touchStartY;
+        if (this.messagesEl.scrollTop <= 0 && deltaY > 60) {
+          pulling = true;
+        }
+      },
+      { passive: true },
+    );
+
+    this.messagesEl.addEventListener(
+      "touchend",
+      () => {
+        // Pull-to-refresh
+        if (pulling) {
+          pulling = false;
+          this.messages = [];
+          this.messagesEl.empty();
+          void this.loadHistory().then(() => this.updateContextMeter());
+          new Notice("Refreshed");
+        }
+      },
+      { passive: true },
+    );
   }
 
   private contextColor(pct: number): string {
@@ -3120,7 +4392,8 @@ class OpenClawChatView extends ItemView {
         idempotencyKey: "reset-" + Date.now(),
       });
       this.messages = [];
-      if (this.plugin.settings.streamItemsMap) this.plugin.settings.streamItemsMap = {};
+      if (this.plugin.settings.streamItemsMap)
+        this.plugin.settings.streamItemsMap = {};
       await this.plugin.saveSettings();
       this.messagesEl.empty();
       await this.updateContextMeter();
@@ -3132,7 +4405,9 @@ class OpenClawChatView extends ItemView {
   }
 
   async reorderTabs(draggedKey: string, targetKey: string): Promise<void> {
-    const keys = this.tabSessions.filter(t => t.key !== "main").map(t => t.key);
+    const keys = this.tabSessions
+      .filter((t) => t.key !== "main")
+      .map((t) => t.key);
     const fromIdx = keys.indexOf(draggedKey);
     const toIdx = keys.indexOf(targetKey);
     if (fromIdx === -1 || toIdx === -1) return;
@@ -3158,15 +4433,23 @@ class OpenClawChatView extends ItemView {
         idempotencyKey: "compact-" + Date.now(),
       });
       // Poll context meter to animate the decrease
-      const pollInterval = window.setInterval(() => void (async () => {
-        await this.updateContextMeter();
-      })(), 2000);
-      window.setTimeout(() => void (async () => {
-        window.clearInterval(pollInterval);
-        this.hideBanner();
-        await this.loadHistory();
-        await this.updateContextMeter();
-      })(), 12000);
+      const pollInterval = window.setInterval(
+        () =>
+          void (async () => {
+            await this.updateContextMeter();
+          })(),
+        2000,
+      );
+      window.setTimeout(
+        () =>
+          void (async () => {
+            window.clearInterval(pollInterval);
+            this.hideBanner();
+            await this.loadHistory();
+            await this.updateContextMeter();
+          })(),
+        12000,
+      );
     } catch (e) {
       this.hideBanner();
       new Notice(`Compact failed: ${e}`);
@@ -3183,7 +4466,8 @@ class OpenClawChatView extends ItemView {
         idempotencyKey: "new-" + Date.now(),
       });
       this.messages = [];
-      if (this.plugin.settings.streamItemsMap) this.plugin.settings.streamItemsMap = {};
+      if (this.plugin.settings.streamItemsMap)
+        this.plugin.settings.streamItemsMap = {};
       await this.plugin.saveSettings();
       this.messagesEl.empty();
       await this.updateContextMeter();
@@ -3200,9 +4484,114 @@ class OpenClawChatView extends ItemView {
     return model.replace(/^claude-/, "");
   }
 
+  /** Recompute the @-mention dropdown from the current caret position. */
+  private updateMentionSuggest(): void {
+    const cursor = this.inputEl.selectionStart ?? this.inputEl.value.length;
+    const mention = detectMention(this.inputEl.value, cursor);
+    if (!mention) {
+      this.closeMentionSuggest();
+      return;
+    }
+    this.activeMention = mention;
+    const items = this.mentionItems(mention.query);
+    if (this.suggest.isOpen) this.suggest.update(items);
+    else this.suggest.show(items);
+  }
 
+  private closeMentionSuggest(): void {
+    this.activeMention = null;
+    this.suggest.close();
+  }
 
+  /** Rank vault files for the dropdown, using Obsidian fuzzy search when querying. */
+  private mentionItems(query: string): SuggestItem[] {
+    const files = this.app.vault
+      .getFiles()
+      .map((f) => ({ path: f.path, mtime: f.stat.mtime }));
+    const matcher = query ? prepareFuzzySearch(query) : null;
+    const score = (_q: string, path: string): number | null => {
+      if (!matcher) return 0;
+      const result = matcher(path);
+      return result ? result.score : null;
+    };
+    return rankMentions(files, query, score, 50).map((f) => ({
+      path: f.path,
+      display: f.path,
+    }));
+  }
 
+  /** Handle a file chosen from the @-mention dropdown. */
+  private async chooseMention(item: SuggestItem): Promise<void> {
+    const mention = this.activeMention;
+    this.closeMentionSuggest();
+
+    const file = this.app.vault.getAbstractFileByPath(item.path);
+    if (!(file instanceof TFile)) return;
+
+    // Insert the mention as inline text (`@<path>`) where the @query was.
+    const token = `@${file.path}`;
+    if (mention) this.insertMentionText(mention, token);
+
+    try {
+      const base = { name: file.name, inline: true, token };
+      const kind = classifyFile({ name: file.name, mimeType: "" });
+      if (kind === "image") {
+        const base64 = arrayBufferToBase64(
+          await this.app.vault.readBinary(file),
+        );
+        this.pendingAttachments.push({
+          ...base,
+          content: `[Attached image: ${file.name}]`,
+          base64,
+          mimeType: imageMimeFromExt(file.extension),
+          vaultPath: file.path,
+        });
+      } else if (kind === "text") {
+        const content = await this.app.vault.read(file);
+        this.pendingAttachments.push({
+          ...base,
+          content: formatTextAttachment(file.path, content),
+        });
+      } else {
+        this.pendingAttachments.push({
+          ...base,
+          content: `[Attached file: ${file.name}]`,
+        });
+      }
+      this.updateSendButton();
+    } catch (e) {
+      new Notice(`Failed to attach ${file.name}: ${e}`);
+    }
+  }
+
+  /** Replace the `@query` with inline mention text, caret left after it. */
+  private insertMentionText(
+    mention: { query: string; start: number },
+    token: string,
+  ): void {
+    const { value, caret } = replaceMention(
+      this.inputEl.value,
+      mention.start,
+      mention.query.length,
+      `${token} `,
+    );
+    this.inputEl.value = value;
+    this.inputEl.setSelectionRange(caret, caret);
+    this.autoResize();
+    this.updateSendButton();
+  }
+
+  /** Drop any inline @-mention attachment whose token is no longer in the textarea. */
+  private reconcileInlineMentions(): void {
+    const survivors = reconcileMentions(
+      this.inputEl.value,
+      this.pendingAttachments,
+    );
+    if (survivors.length !== this.pendingAttachments.length) {
+      this.pendingAttachments = survivors;
+      this.updateSendButton();
+    }
+  }
 
   async handleFileSelect(): Promise<void> {
     const files = this.fileInputEl.files;
@@ -3210,12 +4599,9 @@ class OpenClawChatView extends ItemView {
 
     for (const file of Array.from(files)) {
       try {
-        const isImage = file.type.startsWith("image/");
-        const isText = file.type.startsWith("text/") ||
-          ["application/json", "application/yaml", "application/xml", "application/javascript"].includes(file.type) ||
-          /\.(md|txt|json|csv|yaml|yml|js|ts|py|html|css|xml|toml|ini|sh|log)$/i.test(file.name);
+        const kind = classifyFile({ name: file.name, mimeType: file.type });
 
-        if (isImage) {
+        if (kind === "image") {
           const resized = await this.resizeImage(file, 2048, 0.85);
           this.pendingAttachments.push({
             name: file.name,
@@ -3223,17 +4609,16 @@ class OpenClawChatView extends ItemView {
             base64: resized.base64,
             mimeType: resized.mimeType,
           });
-        } else if (isText) {
+        } else if (kind === "text") {
           const content = await file.text();
-          const truncated = content.length > 10000 ? content.slice(0, 10000) + "\n...(truncated)" : content;
           this.pendingAttachments.push({
             name: file.name,
-            content: `File: ${file.name}\n\`\`\`\n${truncated}\n\`\`\``,
+            content: formatTextAttachment(file.name, content),
           });
         } else {
           this.pendingAttachments.push({
             name: file.name,
-            content: `[Attached file: ${file.name} (${file.type || "unknown type"}, ${Math.round(file.size/1024)}KB)]`,
+            content: `[Attached file: ${file.name} (${file.type || "unknown type"}, ${Math.round(file.size / 1024)}KB)]`,
           });
         }
       } catch (e) {
@@ -3262,7 +4647,11 @@ class OpenClawChatView extends ItemView {
     }
   }
 
-  private async resizeImage(file: File, maxSide: number, quality: number): Promise<{ base64: string; mimeType: string }> {
+  private async resizeImage(
+    file: File,
+    maxSide: number,
+    quality: number,
+  ): Promise<{ base64: string; mimeType: string }> {
     return new Promise((resolve, reject) => {
       const img = new Image();
       const url = URL.createObjectURL(file);
@@ -3278,27 +4667,35 @@ class OpenClawChatView extends ItemView {
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext("2d");
-        if (!ctx) { reject(new Error("No canvas context")); return; }
+        if (!ctx) {
+          reject(new Error("No canvas context"));
+          return;
+        }
         ctx.drawImage(img, 0, 0, width, height);
         const dataUrl = canvas.toDataURL("image/jpeg", quality);
         const base64 = dataUrl.split(",")[1];
         resolve({ base64, mimeType: "image/jpeg" });
       };
-      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Failed to load image")); };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("Failed to load image"));
+      };
       img.src = url;
     });
   }
 
   private renderAttachPreview(): void {
     this.attachPreviewEl.empty();
-    if (this.pendingAttachments.length === 0) {
+    // Inline @-mentions live in the textarea, not the chip strip.
+    const chipped = this.pendingAttachments.filter((a) => !a.inline);
+    if (chipped.length === 0) {
       this.attachPreviewEl.addClass("oc-hidden");
       return;
     }
     this.attachPreviewEl.removeClass("oc-hidden");
 
-    for (let i = 0; i < this.pendingAttachments.length; i++) {
-      const att = this.pendingAttachments[i];
+    for (let i = 0; i < chipped.length; i++) {
+      const att = chipped[i];
       const chip = this.attachPreviewEl.createDiv("openclaw-attach-chip");
 
       // Show thumbnail for images
@@ -3308,21 +4705,35 @@ class OpenClawChatView extends ItemView {
       } else if (att.vaultPath) {
         try {
           const src = this.app.vault.adapter.getResourcePath(att.vaultPath);
-          if (src) chip.createEl("img", { cls: "openclaw-attach-thumb", attr: { src } });
-        } catch { /* ignore */ }
+          if (src)
+            chip.createEl("img", {
+              cls: "openclaw-attach-thumb",
+              attr: { src },
+            });
+        } catch {
+          /* ignore */
+        }
       }
 
       chip.createSpan({ text: att.name, cls: "openclaw-attach-name" });
-      const removeBtn = chip.createEl("button", { text: "✕", cls: "openclaw-attach-remove" });
-      const idx = i;
+      const removeBtn = chip.createEl("button", {
+        text: "✕",
+        cls: "openclaw-attach-remove",
+      });
       removeBtn.addEventListener("click", () => {
-        this.pendingAttachments.splice(idx, 1);
+        // Splice the actual object — `chipped` is a filtered view, so its index
+        // doesn't line up with the backing array.
+        const at = this.pendingAttachments.indexOf(att);
+        if (at >= 0) this.pendingAttachments.splice(at, 1);
         this.renderAttachPreview();
       });
     }
   }
 
-  private buildToolLabel(toolName: string, args: Record<string, unknown> | undefined): { label: string; url?: string } {
+  private buildToolLabel(
+    toolName: string,
+    args: Record<string, unknown> | undefined,
+  ): { label: string; url?: string } {
     const a = args ?? {};
     switch (toolName) {
       case "exec": {
@@ -3330,24 +4741,29 @@ class OpenClawChatView extends ItemView {
         const short = cmd.length > 60 ? cmd.slice(0, 60) + "…" : cmd;
         return { label: `🔧 ${short || "Running command"}` };
       }
-      case "read": case "Read": {
+      case "read":
+      case "Read": {
         const p = str(a?.path, str(a?.file_path));
         const name = p.split("/").pop() || "file";
         return { label: `📄 Reading ${name}` };
       }
-      case "write": case "Write": {
+      case "write":
+      case "Write": {
         const p = str(a?.path, str(a?.file_path));
         const name = p.split("/").pop() || "file";
         return { label: `✏️ Writing ${name}` };
       }
-      case "edit": case "Edit": {
+      case "edit":
+      case "Edit": {
         const p = str(a?.path, str(a?.file_path));
         const name = p.split("/").pop() || "file";
         return { label: `✏️ Editing ${name}` };
       }
       case "web_search": {
         const q = str(a?.query);
-        return { label: `🔍 Searching "${q.length > 40 ? q.slice(0, 40) + "…" : q}"` };
+        return {
+          label: `🔍 Searching "${q.length > 40 ? q.slice(0, 40) + "…" : q}"`,
+        };
       }
       case "web_fetch": {
         const rawUrl = str(a?.url);
@@ -3364,7 +4780,9 @@ class OpenClawChatView extends ItemView {
         return { label: "👁️ Viewing image" };
       case "memory_search": {
         const q = str(a?.query);
-        return { label: `🧠 Searching "${q.length > 40 ? q.slice(0, 40) + "…" : q}"` };
+        return {
+          label: `🧠 Searching "${q.length > 40 ? q.slice(0, 40) + "…" : q}"`,
+        };
       }
       case "memory_get": {
         const p = str(a?.path);
@@ -3383,9 +4801,15 @@ class OpenClawChatView extends ItemView {
   }
 
   private appendToolCall(label: string, url?: string, active = false): void {
-    const el = createDiv({ cls: "openclaw-tool-item" + (active ? " openclaw-tool-active" : "") });
+    const el = createDiv({
+      cls: "openclaw-tool-item" + (active ? " openclaw-tool-active" : ""),
+    });
     if (url) {
-      const link = el.createEl("a", { text: label, href: url, cls: "openclaw-tool-link" });
+      const link = el.createEl("a", {
+        text: label,
+        href: url,
+        cls: "openclaw-tool-link",
+      });
       link.addEventListener("click", (e) => {
         e.preventDefault();
         window.open(url, "_blank");
@@ -3442,7 +4866,8 @@ class OpenClawChatView extends ItemView {
     // Fall back to runId mapping
     const data = payload.data as GatewayPayload | undefined;
     const runId = str(payload.runId, str(data?.runId));
-    if (runId && this.runToSession.has(runId)) return this.runToSession.get(runId)!;
+    if (runId && this.runToSession.has(runId))
+      return this.runToSession.get(runId)!;
     // Last resort: if only one stream is active, use that
     if (this.streams.size === 1) {
       const next = this.streams.keys().next();
@@ -3503,16 +4928,33 @@ class OpenClawChatView extends ItemView {
     }
 
     // Handle explicit tool events
-    const toolName = str(payloadData?.name, str(payloadData?.toolName, str(payload.toolName, str(payload.name))));
+    const toolName = str(
+      payloadData?.name,
+      str(payloadData?.toolName, str(payload.toolName, str(payload.name))),
+    );
     const phase = str(payloadData?.phase, str(payload.phase));
 
-    if ((stream === "tool" || toolName) && (phase === "start" || state === "tool_use")) {
-      if (ss.compactTimer) { window.clearTimeout(ss.compactTimer); ss.compactTimer = null; }
-      if (ss.workingTimer) { window.clearTimeout(ss.workingTimer); ss.workingTimer = null; }
+    if (
+      (stream === "tool" || toolName) &&
+      (phase === "start" || state === "tool_use")
+    ) {
+      if (ss.compactTimer) {
+        window.clearTimeout(ss.compactTimer);
+        ss.compactTimer = null;
+      }
+      if (ss.workingTimer) {
+        window.clearTimeout(ss.workingTimer);
+        ss.workingTimer = null;
+      }
       if (ss.text) {
         ss.splitPoints.push(ss.text.length);
       }
-      const { label, url } = this.buildToolLabel(toolName, (payloadData?.args || payload.args) as Record<string, unknown> | undefined);
+      const { label, url } = this.buildToolLabel(
+        toolName,
+        (payloadData?.args || payload.args) as
+          | Record<string, unknown>
+          | undefined,
+      );
       ss.toolCalls.push(label);
       ss.items.push({ type: "tool", label, url } as StreamItem);
       if (isActiveTab) {
@@ -3549,7 +4991,11 @@ class OpenClawChatView extends ItemView {
     let eventSessionKey: string | null = null;
     // Try to match against known sessions
     for (const sk of [...this.streams.keys(), this.activeSessionKey]) {
-      if (payloadSk === sk || payloadSk === `${prefix}${sk}` || payloadSk.endsWith(`:${sk}`)) {
+      if (
+        payloadSk === sk ||
+        payloadSk === `${prefix}${sk}` ||
+        payloadSk.endsWith(`:${sk}`)
+      ) {
         eventSessionKey = sk;
         break;
       }
@@ -3557,7 +5003,11 @@ class OpenClawChatView extends ItemView {
     // If no stream match, check if it's for the active tab (passive device case)
     if (!eventSessionKey) {
       const active = this.activeSessionKey;
-      if (payloadSk === active || payloadSk === `${prefix}${active}` || payloadSk.endsWith(`:${active}`)) {
+      if (
+        payloadSk === active ||
+        payloadSk === `${prefix}${active}` ||
+        payloadSk.endsWith(`:${active}`)
+      ) {
         eventSessionKey = active;
       } else {
         return; // Not for any known session
@@ -3569,7 +5019,12 @@ class OpenClawChatView extends ItemView {
     const chatState = str(payload.state);
 
     // No active stream for this session (passive device): still refresh history
-    if (!ss && (chatState === "final" || chatState === "aborted" || chatState === "error")) {
+    if (
+      !ss &&
+      (chatState === "final" ||
+        chatState === "aborted" ||
+        chatState === "error")
+    ) {
       if (isActiveTab) {
         this.hideBanner();
         void this.loadHistory();
@@ -3578,10 +5033,18 @@ class OpenClawChatView extends ItemView {
     }
 
     if (chatState === "delta" && ss) {
-      if (ss.compactTimer) { window.clearTimeout(ss.compactTimer); ss.compactTimer = null; }
-      if (ss.workingTimer) { window.clearTimeout(ss.workingTimer); ss.workingTimer = null; }
+      if (ss.compactTimer) {
+        window.clearTimeout(ss.compactTimer);
+        ss.compactTimer = null;
+      }
+      if (ss.workingTimer) {
+        window.clearTimeout(ss.workingTimer);
+        ss.workingTimer = null;
+      }
       ss.lastDeltaTime = Date.now();
-      const text = this.extractDeltaText(payload.message as Record<string, unknown> | string | undefined);
+      const text = this.extractDeltaText(
+        payload.message as Record<string, unknown> | string | undefined,
+      );
       if (text) {
         ss.text = text;
         if (isActiveTab) {
@@ -3599,10 +5062,13 @@ class OpenClawChatView extends ItemView {
           await this.renderMessages();
           void this.updateContextMeter();
           if (items.length > 0) {
-            const lastAssistant = [...this.messages].reverse().find(m => m.role === "assistant");
+            const lastAssistant = [...this.messages]
+              .reverse()
+              .find((m) => m.role === "assistant");
             if (lastAssistant) {
               const key = String(lastAssistant.timestamp);
-              if (!this.plugin.settings.streamItemsMap) this.plugin.settings.streamItemsMap = {};
+              if (!this.plugin.settings.streamItemsMap)
+                this.plugin.settings.streamItemsMap = {};
               this.plugin.settings.streamItemsMap[key] = items;
               void this.plugin.saveSettings();
             }
@@ -3613,7 +5079,12 @@ class OpenClawChatView extends ItemView {
       }
     } else if (chatState === "aborted") {
       if (isActiveTab && ss?.text) {
-        this.messages.push({ role: "assistant", text: ss.text, images: [], timestamp: Date.now() });
+        this.messages.push({
+          role: "assistant",
+          text: ss.text,
+          images: [],
+          timestamp: Date.now(),
+        });
       }
       this.finishStream(eventSessionKey);
       if (isActiveTab) void this.renderMessages();
@@ -3700,16 +5171,26 @@ class OpenClawChatView extends ItemView {
     if (item.type === "tool") {
       const el = createDiv({ cls: "openclaw-tool-item" });
       if (item.url) {
-        const link = el.createEl("a", { text: item.label, href: item.url, cls: "openclaw-tool-link" });
-        link.addEventListener("click", (e) => { e.preventDefault(); window.open(item.url, "_blank"); });
+        const link = el.createEl("a", {
+          text: item.label,
+          href: item.url,
+          cls: "openclaw-tool-link",
+        });
+        link.addEventListener("click", (e) => {
+          e.preventDefault();
+          window.open(item.url, "_blank");
+        });
       } else {
         el.textContent = item.label;
       }
       return el;
     } else {
       const details = createEl("details", { cls: "openclaw-intermediary" });
-      const summary = createEl("summary", { cls: "openclaw-intermediary-summary" });
-      const preview = item.text.length > 60 ? item.text.slice(0, 60) + "..." : item.text;
+      const summary = createEl("summary", {
+        cls: "openclaw-intermediary-summary",
+      });
+      const preview =
+        item.text.length > 60 ? item.text.slice(0, 60) + "..." : item.text;
       summary.textContent = preview;
       details.appendChild(summary);
       const content = createDiv({ cls: "openclaw-intermediary-content" });
@@ -3720,8 +5201,15 @@ class OpenClawChatView extends ItemView {
   }
 
   private cleanText(text: string): string {
-    text = text.replace(/Conversation info \(untrusted metadata\):\s*```json[\s\S]*?```\s*/g, "").trim();
-    text = text.replace(/^```json\s*\{\s*"message_id"[\s\S]*?```\s*/gm, "").trim();
+    text = text
+      .replace(
+        /Conversation info \(untrusted metadata\):\s*```json[\s\S]*?```\s*/g,
+        "",
+      )
+      .trim();
+    text = text
+      .replace(/^```json\s*\{\s*"message_id"[\s\S]*?```\s*/gm, "")
+      .trim();
     text = text.replace(/^\[.*?GMT[+-]\d+\]\s*/gm, "").trim();
     text = text.replace(/^\[media attached:.*?\]\s*/gm, "").trim();
     text = text.replace(/^To send an image back.*$/gm, "").trim();
@@ -3758,54 +5246,86 @@ class OpenClawChatView extends ItemView {
   /** Render an inline audio player that fetches audio via gateway HTTP */
   private renderAudioPlayer(container: HTMLElement, voiceRef: string): void {
     const playerEl = container.createDiv("openclaw-audio-player");
-    const playBtn = playerEl.createEl("button", { cls: "openclaw-audio-play-btn", text: "▶ voice message" });
+    const playBtn = playerEl.createEl("button", {
+      cls: "openclaw-audio-play-btn",
+      text: "▶ voice message",
+    });
     const progressEl = playerEl.createDiv("openclaw-audio-progress");
     const barEl = progressEl.createDiv("openclaw-audio-bar");
 
     let audio: HTMLAudioElement | null = null;
 
-    playBtn.addEventListener("click", () => void (async () => {
-      if (audio && !audio.paused) {
-        audio.pause();
-        playBtn.textContent = "▶ voice message";
-        return;
-      }
-
-      if (!audio) {
-        playBtn.textContent = "⏳ loading...";
-        try {
-          const url = this.buildVoiceUrl(voiceRef);
-          console.debug("[ObsidianClaw] Loading audio from:", url);
-          audio = new Audio(url);
-
-          await new Promise<void>((resolve, reject) => {
-            const timer = window.setTimeout(() => reject(new Error("timeout")), 10000);
-            audio!.addEventListener("canplaythrough", () => { window.clearTimeout(timer); resolve(); }, { once: true });
-            audio!.addEventListener("error", () => { window.clearTimeout(timer); reject(new Error("load error")); }, { once: true });
-            audio!.load();
-          });
-
-          audio.addEventListener("timeupdate", () => {
-            if (audio && audio.duration) barEl.setCssStyles({ width: `${(audio.currentTime / audio.duration) * 100}%` });
-          });
-          audio.addEventListener("ended", () => {
+    playBtn.addEventListener(
+      "click",
+      () =>
+        void (async () => {
+          if (audio && !audio.paused) {
+            audio.pause();
             playBtn.textContent = "▶ voice message";
-            barEl.setCssStyles({ width: "0%" });
-          });
-        } catch (e) {
-          console.error("[ObsidianClaw] Audio load failed:", e);
-          playBtn.textContent = "⚠ audio unavailable";
-          playBtn.disabled = true;
-          return;
-        }
-      }
+            return;
+          }
 
-      playBtn.textContent = "⏸ playing...";
-      audio.play().catch(() => { playBtn.textContent = "⚠ audio unavailable"; playBtn.disabled = true; });
-    })());
+          if (!audio) {
+            playBtn.textContent = "⏳ loading...";
+            try {
+              const url = this.buildVoiceUrl(voiceRef);
+              console.debug("[ObsidianClaw] Loading audio from:", url);
+              audio = new Audio(url);
+
+              await new Promise<void>((resolve, reject) => {
+                const timer = window.setTimeout(
+                  () => reject(new Error("timeout")),
+                  10000,
+                );
+                audio!.addEventListener(
+                  "canplaythrough",
+                  () => {
+                    window.clearTimeout(timer);
+                    resolve();
+                  },
+                  { once: true },
+                );
+                audio!.addEventListener(
+                  "error",
+                  () => {
+                    window.clearTimeout(timer);
+                    reject(new Error("load error"));
+                  },
+                  { once: true },
+                );
+                audio!.load();
+              });
+
+              audio.addEventListener("timeupdate", () => {
+                if (audio && audio.duration)
+                  barEl.setCssStyles({
+                    width: `${(audio.currentTime / audio.duration) * 100}%`,
+                  });
+              });
+              audio.addEventListener("ended", () => {
+                playBtn.textContent = "▶ voice message";
+                barEl.setCssStyles({ width: "0%" });
+              });
+            } catch (e) {
+              console.error("[ObsidianClaw] Audio load failed:", e);
+              playBtn.textContent = "⚠ audio unavailable";
+              playBtn.disabled = true;
+              return;
+            }
+          }
+
+          playBtn.textContent = "⏸ playing...";
+          audio.play().catch(() => {
+            playBtn.textContent = "⚠ audio unavailable";
+            playBtn.disabled = true;
+          });
+        })(),
+    );
   }
 
-  private extractDeltaText(msg: Record<string, unknown> | string | undefined): string {
+  private extractDeltaText(
+    msg: Record<string, unknown> | string | undefined,
+  ): string {
     if (typeof msg === "string") return msg;
     if (!msg) return "";
     // Gateway sends {role, content, timestamp} where content is [{type:"text", text:"..."}]
@@ -3813,8 +5333,11 @@ class OpenClawChatView extends ItemView {
     if (Array.isArray(content)) {
       let text = "";
       for (const block of content) {
-        if (typeof block === "string") { text += block; }
-        else if (block && typeof block === "object" && "text" in block) { text += (text ? "\n" : "") + String((block as { text: string }).text); }
+        if (typeof block === "string") {
+          text += block;
+        } else if (block && typeof block === "object" && "text" in block) {
+          text += (text ? "\n" : "") + String((block as { text: string }).text);
+        }
       }
       return text;
     }
@@ -3827,7 +5350,9 @@ class OpenClawChatView extends ItemView {
     const visibleText = ss?.text;
     if (!visibleText) return;
     if (!this.streamEl) {
-      this.streamEl = this.messagesEl.createDiv("openclaw-msg openclaw-msg-assistant openclaw-streaming");
+      this.streamEl = this.messagesEl.createDiv(
+        "openclaw-msg openclaw-msg-assistant openclaw-streaming",
+      );
       this.scrollToBottom(); // Scroll once when bubble first appears
     }
     this.streamEl.empty();
@@ -3839,7 +5364,10 @@ class OpenClawChatView extends ItemView {
     this.messagesEl.empty();
     for (const msg of this.messages) {
       if (msg.role === "assistant") {
-        const hasContentTools = msg.contentBlocks?.some((b: ContentBlock) => b.type === "tool_use" || b.type === "toolCall") || false;
+        const hasContentTools =
+          msg.contentBlocks?.some(
+            (b: ContentBlock) => b.type === "tool_use" || b.type === "toolCall",
+          ) || false;
 
         if (hasContentTools && msg.contentBlocks) {
           // Render interleaved text + tool blocks directly
@@ -3849,9 +5377,17 @@ class OpenClawChatView extends ItemView {
               const cleaned = this.cleanText(block.text);
               // Render text bubble if there's visible text
               if (cleaned) {
-                const bubble = this.messagesEl.createDiv("openclaw-msg openclaw-msg-assistant");
+                const bubble = this.messagesEl.createDiv(
+                  "openclaw-msg openclaw-msg-assistant",
+                );
                 try {
-                  await MarkdownRenderer.render(this.app, cleaned, bubble, "", this);
+                  await MarkdownRenderer.render(
+                    this.app,
+                    cleaned,
+                    bubble,
+                    "",
+                    this,
+                  );
                 } catch {
                   bubble.createDiv({ text: cleaned, cls: "openclaw-msg-text" });
                 }
@@ -3861,22 +5397,31 @@ class OpenClawChatView extends ItemView {
                 }
               } else if (blockAudio.length > 0) {
                 // No visible text but has audio — create a bubble just for the player
-                const bubble = this.messagesEl.createDiv("openclaw-msg openclaw-msg-assistant");
+                const bubble = this.messagesEl.createDiv(
+                  "openclaw-msg openclaw-msg-assistant",
+                );
                 for (const ap of blockAudio) {
                   this.renderAudioPlayer(bubble, ap);
                 }
               }
             } else if (block.type === "tool_use" || block.type === "toolCall") {
-              const { label, url } = this.buildToolLabel(block.name || "", block.input || block.arguments || {});
-              const el = this.createStreamItemEl({ type: "tool", label, url } as StreamItem);
+              const { label, url } = this.buildToolLabel(
+                block.name || "",
+                block.input || block.arguments || {},
+              );
+              const el = this.createStreamItemEl({
+                type: "tool",
+                label,
+                url,
+              } as StreamItem);
               this.messagesEl.appendChild(el);
             }
           }
           continue;
         }
-
       }
-      const cls = msg.role === "user" ? "openclaw-msg-user" : "openclaw-msg-assistant";
+      const cls =
+        msg.role === "user" ? "openclaw-msg-user" : "openclaw-msg-assistant";
       const bubble = this.messagesEl.createDiv(`openclaw-msg ${cls}`);
       // Render images
       if (msg.images && msg.images.length > 0) {
@@ -3888,7 +5433,9 @@ class OpenClawChatView extends ItemView {
           });
           img.addEventListener("click", () => {
             // Open full-size in a modal-like overlay
-            const overlay = activeDocument.body.createDiv("openclaw-img-overlay");
+            const overlay = activeDocument.body.createDiv(
+              "openclaw-img-overlay",
+            );
             overlay.createEl("img", { attr: { src } });
             overlay.addEventListener("click", () => overlay.remove());
           });
@@ -3899,16 +5446,23 @@ class OpenClawChatView extends ItemView {
 
       // Render text
       if (msg.text) {
-        const displayText = msg.role === "assistant" ? this.cleanText(msg.text) : msg.text;
+        const displayText =
+          msg.role === "assistant" ? this.cleanText(msg.text) : msg.text;
         if (displayText) {
           if (msg.role === "assistant") {
             try {
-              await MarkdownRenderer.render(this.app, displayText, bubble, "", this);
+              await MarkdownRenderer.render(
+                this.app,
+                displayText,
+                bubble,
+                "",
+                this,
+              );
             } catch {
               bubble.createDiv({ text: displayText, cls: "openclaw-msg-text" });
             }
           } else {
-            bubble.createDiv({ text: displayText, cls: "openclaw-msg-text" });
+            this.renderUserText(bubble, displayText);
           }
         }
       }
@@ -3919,6 +5473,30 @@ class OpenClawChatView extends ItemView {
       }
     }
     this.scrollToBottom();
+  }
+
+  /**
+   * Render a user message, collapsing any attached file blocks (from
+   * `formatTextAttachment`) behind a toggle so the history shows the mention,
+   * not the whole file. Plain text renders as before.
+   */
+  private renderUserText(bubble: HTMLElement, text: string): void {
+    for (const seg of splitFileBlocks(text)) {
+      if (seg.type === "text") {
+        bubble.createDiv({ text: seg.text, cls: "openclaw-msg-text" });
+      } else {
+        const details = bubble.createEl("details", {
+          cls: "openclaw-file-attachment",
+        });
+        details.createEl("summary", {
+          cls: "openclaw-file-summary",
+          text: seg.label,
+        });
+        details
+          .createEl("pre", { cls: "openclaw-file-body" })
+          .createEl("code", { text: seg.body });
+      }
+    }
   }
 
   private scrollToBottom(): void {
@@ -3932,7 +5510,9 @@ class OpenClawChatView extends ItemView {
 
   private autoResize(): void {
     this.inputEl.setCssStyles({ height: "auto" });
-    this.inputEl.setCssStyles({ height: Math.min(this.inputEl.scrollHeight, 150) + "px" });
+    this.inputEl.setCssStyles({
+      height: Math.min(this.inputEl.scrollHeight, 150) + "px",
+    });
   }
 }
 
@@ -4036,7 +5616,9 @@ export default class OpenClawPlugin extends Plugin {
     // Normalize URL (accept https:// and http:// as well)
     const url = normalizeGatewayUrl(rawUrl);
     if (!url) {
-      new Notice("OpenClaw: Invalid gateway URL. Use your Tailscale Serve URL (e.g. wss://your-machine.tail1234.ts.net)");
+      new Notice(
+        "OpenClaw: Invalid gateway URL. Use your Tailscale Serve URL (e.g. wss://your-machine.tail1234.ts.net)",
+      );
       return;
     }
 
@@ -4051,10 +5633,13 @@ export default class OpenClawPlugin extends Plugin {
     try {
       deviceIdentity = await getOrCreateDeviceIdentity(
         () => this.loadData(),
-        (data) => this.saveData(data)
+        (data) => this.saveData(data),
       );
     } catch (e) {
-      console.warn("[ObsidianClaw] Device identity creation failed, connecting without scopes:", e);
+      console.warn(
+        "[ObsidianClaw] Device identity creation failed, connecting without scopes:",
+        e,
+      );
     }
 
     this.gateway = new GatewayClient({
@@ -4083,7 +5668,13 @@ export default class OpenClawPlugin extends Plugin {
         this.chatView?.updateStatus();
         // Show pairing banner if needed
         const reason = info.reason.toLowerCase();
-        if (reason.includes("pair") || reason.includes("device") || reason.includes("approval") || reason.includes("scope") || reason.includes("auth")) {
+        if (
+          reason.includes("pair") ||
+          reason.includes("device") ||
+          reason.includes("approval") ||
+          reason.includes("scope") ||
+          reason.includes("auth")
+        ) {
           this.chatView?.showPairingBanner();
         }
         // Track handshake-only failures (closed without ever reaching onHello).
@@ -4092,7 +5683,11 @@ export default class OpenClawPlugin extends Plugin {
         if (!wasConnected) {
           this.handshakeFailuresInARow += 1;
           const lacksReason = !info.reason || info.reason.trim() === "";
-          if (this.handshakeFailuresInARow >= 3 && lacksReason && !this.patchHintShownThisSession) {
+          if (
+            this.handshakeFailuresInARow >= 3 &&
+            lacksReason &&
+            !this.patchHintShownThisSession
+          ) {
             this.patchHintShownThisSession = true;
             new Notice(
               "OpenClaw: handshake keeps failing. If your gateway is reachable, you may need to (re-)apply the origin patch. Open Settings → OpenClaw → Run setup wizard for the command.",
@@ -4150,7 +5745,9 @@ export default class OpenClawPlugin extends Plugin {
     }
 
     const message = `Here is my current note "${file.basename}":\n\n${content}\n\nWhat can you tell me about this?`;
-    const inputEl = this.chatView.containerEl.querySelector(".openclaw-input") as HTMLTextAreaElement;
+    const inputEl = this.chatView.containerEl.querySelector(
+      ".openclaw-input",
+    ) as HTMLTextAreaElement;
     if (inputEl) {
       inputEl.value = message;
       inputEl.focus();
@@ -4159,8 +5756,6 @@ export default class OpenClawPlugin extends Plugin {
 }
 
 // ─── Confirm Modal ──────────────────────────────────────────────────
-
-
 
 // ─── Model Picker Modal ─────────────────────────────────────────────
 
@@ -4179,17 +5774,24 @@ class ModelPickerModal extends Modal {
 
   async onOpen(): Promise<void> {
     this.modalEl.addClass("openclaw-picker");
-    this.contentEl.createDiv("openclaw-picker-loading").textContent = "Loading models...";
+    this.contentEl.createDiv("openclaw-picker-loading").textContent =
+      "Loading models...";
 
     try {
-      const result = await this.plugin.gateway?.request("models.list", {}) as { models?: ModelInfo[] } | undefined;
+      const result = (await this.plugin.gateway?.request("models.list", {})) as
+        | { models?: ModelInfo[] }
+        | undefined;
       this.models = result?.models || [];
-    } catch { this.models = []; }
+    } catch {
+      this.models = [];
+    }
 
     // Normalize currentModel to always be provider/id format
     this.currentModel = this.chatView.currentModel || "";
     if (this.currentModel && !this.currentModel.includes("/")) {
-      const match = this.models.find((m: ModelInfo) => m.id === this.currentModel);
+      const match = this.models.find(
+        (m: ModelInfo) => m.id === this.currentModel,
+      );
       if (match) this.currentModel = `${match.provider}/${match.id}`;
     }
 
@@ -4207,7 +5809,9 @@ class ModelPickerModal extends Modal {
     }
   }
 
-  onClose(): void { this.contentEl.empty(); }
+  onClose(): void {
+    this.contentEl.empty();
+  }
 
   private renderProviders(): void {
     const { contentEl } = this;
@@ -4222,20 +5826,28 @@ class ModelPickerModal extends Modal {
     }
 
     // Current provider from currentModel
-    const currentProvider = this.currentModel.includes("/") ? this.currentModel.split("/")[0] : "";
+    const currentProvider = this.currentModel.includes("/")
+      ? this.currentModel.split("/")[0]
+      : "";
 
     const list = contentEl.createDiv("openclaw-picker-list");
 
     for (const [provider, models] of providerMap) {
       const isCurrent = provider === currentProvider;
-      const row = list.createDiv({ cls: `openclaw-picker-row${isCurrent ? " active" : ""}` });
+      const row = list.createDiv({
+        cls: `openclaw-picker-row${isCurrent ? " active" : ""}`,
+      });
 
       const left = row.createDiv("openclaw-picker-row-left");
-      if (isCurrent) left.createSpan({ text: "● ", cls: "openclaw-picker-dot" });
+      if (isCurrent)
+        left.createSpan({ text: "● ", cls: "openclaw-picker-dot" });
       left.createSpan({ text: provider, cls: "openclaw-picker-provider-name" });
 
       const right = row.createDiv("openclaw-picker-row-right");
-      right.createSpan({ text: `${models.length} model${models.length !== 1 ? "s" : ""}`, cls: "openclaw-picker-meta" });
+      right.createSpan({
+        text: `${models.length} model${models.length !== 1 ? "s" : ""}`,
+        cls: "openclaw-picker-meta",
+      });
       right.createSpan({ text: " →", cls: "openclaw-picker-arrow" });
 
       row.addEventListener("click", () => {
@@ -4245,9 +5857,14 @@ class ModelPickerModal extends Modal {
     }
 
     // Footer
-    const footer = contentEl.createDiv("openclaw-picker-hint openclaw-picker-footer");
+    const footer = contentEl.createDiv(
+      "openclaw-picker-hint openclaw-picker-footer",
+    );
     footer.appendText("Want more models? ");
-    footer.createEl("a", { text: "Add them in your gateway config.", href: "https://docs.openclaw.ai/gateway/configuration#choose-and-configure-models" });
+    footer.createEl("a", {
+      text: "Add them in your gateway config.",
+      href: "https://docs.openclaw.ai/gateway/configuration#choose-and-configure-models",
+    });
   }
 
   private renderModels(provider: string): void {
@@ -4258,46 +5875,60 @@ class ModelPickerModal extends Modal {
     const providers = new Set(this.models.map((m: ModelInfo) => m.provider));
     if (providers.size > 1) {
       const header = contentEl.createDiv("openclaw-picker-header");
-      const backBtn = header.createEl("button", { cls: "openclaw-picker-back", text: "← " + provider });
+      const backBtn = header.createEl("button", {
+        cls: "openclaw-picker-back",
+        text: "← " + provider,
+      });
       backBtn.addEventListener("click", () => this.renderProviders());
     }
 
-    const models = this.models.filter((m: ModelInfo) => m.provider === provider);
-    const list = contentEl.createDiv("openclaw-picker-list openclaw-picker-model-list");
+    const models = this.models.filter(
+      (m: ModelInfo) => m.provider === provider,
+    );
+    const list = contentEl.createDiv(
+      "openclaw-picker-list openclaw-picker-model-list",
+    );
 
     for (const m of models) {
       const fullId = `${m.provider}/${m.id}`;
       const isCurrent = fullId === this.currentModel;
-      const row = list.createDiv({ cls: `openclaw-picker-row${isCurrent ? " active" : ""}` });
+      const row = list.createDiv({
+        cls: `openclaw-picker-row${isCurrent ? " active" : ""}`,
+      });
 
       const left = row.createDiv("openclaw-picker-row-left");
-      if (isCurrent) left.createSpan({ text: "● ", cls: "openclaw-picker-dot" });
+      if (isCurrent)
+        left.createSpan({ text: "● ", cls: "openclaw-picker-dot" });
       left.createSpan({ text: m.name || m.id });
 
       // Always clickable - even the current model (user might want to re-select it)
-      row.addEventListener("click", () => void (async () => {
-        if (!this.plugin.gateway?.connected) return;
-        row.addClass("openclaw-picker-selecting");
-        row.textContent = "Switching...";
-        try {
-          await this.plugin.gateway.request("chat.send", {
-            sessionKey: this.plugin.settings.sessionKey,
-            message: `/model ${fullId}`,
-            deliver: false,
-            idempotencyKey: "model-" + Date.now(),
-          });
-          this.chatView.currentModel = fullId;
-          this.chatView.currentModelSetAt = Date.now();
-          this.plugin.settings.currentModel = fullId;
-          await this.plugin.saveSettings();
-          this.chatView.updateModelPill();
-          new Notice(`Model: ${m.name || m.id}`);
-          this.close();
-        } catch (e) {
-          new Notice(`Failed: ${e}`);
-          this.renderModels(provider);
-        }
-      })());
+      row.addEventListener(
+        "click",
+        () =>
+          void (async () => {
+            if (!this.plugin.gateway?.connected) return;
+            row.addClass("openclaw-picker-selecting");
+            row.textContent = "Switching...";
+            try {
+              await this.plugin.gateway.request("chat.send", {
+                sessionKey: this.plugin.settings.sessionKey,
+                message: `/model ${fullId}`,
+                deliver: false,
+                idempotencyKey: "model-" + Date.now(),
+              });
+              this.chatView.currentModel = fullId;
+              this.chatView.currentModelSetAt = Date.now();
+              this.plugin.settings.currentModel = fullId;
+              await this.plugin.saveSettings();
+              this.chatView.updateModelPill();
+              new Notice(`Model: ${m.name || m.id}`);
+              this.close();
+            } catch (e) {
+              new Notice(`Failed: ${e}`);
+              this.renderModels(provider);
+            }
+          })(),
+      );
     }
   }
 }
@@ -4305,9 +5936,22 @@ class ModelPickerModal extends Modal {
 // ─── Confirm Modal ───────────────────────────────────────────────────
 
 class _ConfirmModal extends Modal {
-  private config: { title: string; message: string; confirmText: string; onConfirm: () => void };
+  private config: {
+    title: string;
+    message: string;
+    confirmText: string;
+    onConfirm: () => void;
+  };
 
-  constructor(app: App, config: { title: string; message: string; confirmText: string; onConfirm: () => void }) {
+  constructor(
+    app: App,
+    config: {
+      title: string;
+      message: string;
+      confirmText: string;
+      onConfirm: () => void;
+    },
+  ) {
     super(app);
     this.config = config;
   }
@@ -4315,12 +5959,24 @@ class _ConfirmModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.addClass("openclaw-confirm-modal");
-    contentEl.createEl("h3", { text: this.config.title, cls: "openclaw-confirm-title" });
-    contentEl.createEl("p", { text: this.config.message, cls: "openclaw-confirm-message" });
+    contentEl.createEl("h3", {
+      text: this.config.title,
+      cls: "openclaw-confirm-title",
+    });
+    contentEl.createEl("p", {
+      text: this.config.message,
+      cls: "openclaw-confirm-message",
+    });
     const btnRow = contentEl.createDiv("openclaw-confirm-buttons");
-    const cancelBtn = btnRow.createEl("button", { text: "Cancel", cls: "openclaw-confirm-cancel" });
+    const cancelBtn = btnRow.createEl("button", {
+      text: "Cancel",
+      cls: "openclaw-confirm-cancel",
+    });
     cancelBtn.addEventListener("click", () => this.close());
-    const confirmBtn = btnRow.createEl("button", { text: this.config.confirmText, cls: "openclaw-confirm-ok" });
+    const confirmBtn = btnRow.createEl("button", {
+      text: this.config.confirmText,
+      cls: "openclaw-confirm-ok",
+    });
     confirmBtn.addEventListener("click", () => {
       this.close();
       this.config.onConfirm();
@@ -4340,7 +5996,12 @@ class ConfirmCloseModal extends Modal {
   private callback: (result: boolean, dontAsk: boolean) => void;
   private checkboxEl!: HTMLInputElement;
 
-  constructor(app: App, title: string, message: string, callback: (result: boolean, dontAsk: boolean) => void) {
+  constructor(
+    app: App,
+    title: string,
+    message: string,
+    callback: (result: boolean, dontAsk: boolean) => void,
+  ) {
     super(app);
     this.title = title;
     this.message = message;
@@ -4350,21 +6011,36 @@ class ConfirmCloseModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.addClass("openclaw-confirm-modal");
-    contentEl.createEl("h3", { text: this.title, cls: "openclaw-confirm-title" });
-    contentEl.createEl("p", { text: this.message, cls: "openclaw-confirm-message" });
-    
+    contentEl.createEl("h3", {
+      text: this.title,
+      cls: "openclaw-confirm-title",
+    });
+    contentEl.createEl("p", {
+      text: this.message,
+      cls: "openclaw-confirm-message",
+    });
+
     const checkRow = contentEl.createDiv("openclaw-confirm-check");
     this.checkboxEl = checkRow.createEl("input", { type: "checkbox" });
     this.checkboxEl.id = "confirm-dont-ask";
-    checkRow.createEl("label", { text: "Don't ask me again", attr: { for: "confirm-dont-ask" } });
+    checkRow.createEl("label", {
+      text: "Don't ask me again",
+      attr: { for: "confirm-dont-ask" },
+    });
 
     const btnRow = contentEl.createDiv("openclaw-confirm-buttons");
-    const cancelBtn = btnRow.createEl("button", { text: "Cancel", cls: "openclaw-confirm-cancel" });
+    const cancelBtn = btnRow.createEl("button", {
+      text: "Cancel",
+      cls: "openclaw-confirm-cancel",
+    });
     cancelBtn.addEventListener("click", () => {
       this.callback(false, false);
       this.close();
     });
-    const confirmBtn = btnRow.createEl("button", { text: this.title.startsWith("Reset") ? "Reset" : "Close", cls: "openclaw-confirm-ok" });
+    const confirmBtn = btnRow.createEl("button", {
+      text: this.title.startsWith("Reset") ? "Reset" : "Close",
+      cls: "openclaw-confirm-ok",
+    });
     confirmBtn.addEventListener("click", () => {
       this.callback(true, this.checkboxEl.checked);
       this.close();
@@ -4379,10 +6055,25 @@ class ConfirmCloseModal extends Modal {
 // ─── Text Input Modal ────────────────────────────────────────────────
 
 class _TextInputModal extends Modal {
-  private config: { title: string; placeholder: string; confirmText: string; initialValue?: string; onConfirm: (value: string) => void };
+  private config: {
+    title: string;
+    placeholder: string;
+    confirmText: string;
+    initialValue?: string;
+    onConfirm: (value: string) => void;
+  };
   private inputEl!: HTMLInputElement;
 
-  constructor(app: App, config: { title: string; placeholder: string; confirmText: string; initialValue?: string; onConfirm: (value: string) => void }) {
+  constructor(
+    app: App,
+    config: {
+      title: string;
+      placeholder: string;
+      confirmText: string;
+      initialValue?: string;
+      onConfirm: (value: string) => void;
+    },
+  ) {
     super(app);
     this.config = config;
   }
@@ -4390,7 +6081,10 @@ class _TextInputModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.addClass("openclaw-confirm-modal");
-    contentEl.createEl("h3", { text: this.config.title, cls: "openclaw-confirm-title" });
+    contentEl.createEl("h3", {
+      text: this.config.title,
+      cls: "openclaw-confirm-title",
+    });
     this.inputEl = contentEl.createEl("input", {
       type: "text",
       placeholder: this.config.placeholder,
@@ -4405,9 +6099,15 @@ class _TextInputModal extends Modal {
       }
     });
     const btnRow = contentEl.createDiv("openclaw-confirm-buttons");
-    const cancelBtn = btnRow.createEl("button", { text: "Cancel", cls: "openclaw-confirm-cancel" });
+    const cancelBtn = btnRow.createEl("button", {
+      text: "Cancel",
+      cls: "openclaw-confirm-cancel",
+    });
     cancelBtn.addEventListener("click", () => this.close());
-    const confirmBtn = btnRow.createEl("button", { text: this.config.confirmText, cls: "openclaw-confirm-ok" });
+    const confirmBtn = btnRow.createEl("button", {
+      text: this.config.confirmText,
+      cls: "openclaw-confirm-ok",
+    });
     confirmBtn.addEventListener("click", () => this.submit());
   }
 
@@ -4473,7 +6173,10 @@ class OpenClawSettingTab extends PluginSettingTab {
       text: "The easiest way to connect. Walks you through Tailscale, gateway setup, and device pairing step by step.",
       cls: "setting-item-description",
     });
-    const wizardBtn = wizardSection.createEl("button", { text: "Run setup wizard", cls: "mod-cta openclaw-settings-wizard-btn" });
+    const wizardBtn = wizardSection.createEl("button", {
+      text: "Run setup wizard",
+      cls: "mod-cta openclaw-settings-wizard-btn",
+    });
     wizardBtn.addEventListener("click", () => {
       new OnboardingModal(this.app, this.plugin).open();
     });
@@ -4481,8 +6184,13 @@ class OpenClawSettingTab extends PluginSettingTab {
     // ─── Status ──────────────────────────────────────────────────
     const statusSection = containerEl.createDiv("openclaw-settings-status");
     const connected = this.plugin.gatewayConnected;
-    statusSection.createSpan({ cls: `openclaw-settings-dot ${connected ? "connected" : "disconnected"}` });
-    statusSection.createSpan({ text: connected ? "Connected" : "Disconnected", cls: "openclaw-settings-status-text" });
+    statusSection.createSpan({
+      cls: `openclaw-settings-dot ${connected ? "connected" : "disconnected"}`,
+    });
+    statusSection.createSpan({
+      text: connected ? "Connected" : "Disconnected",
+      cls: "openclaw-settings-status-text",
+    });
     if (this.plugin.settings.gatewayUrl) {
       statusSection.createSpan({
         text: ` — ${this.plugin.settings.gatewayUrl.replace(/^wss?:\/\//, "")}`,
@@ -4495,7 +6203,7 @@ class OpenClawSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Conversation")
-      .setDesc("Current conversation key. Use \"main\" for the default session.")
+      .setDesc('Current conversation key. Use "main" for the default session.')
       .addText((text) =>
         text
           .setPlaceholder("Main")
@@ -4504,18 +6212,16 @@ class OpenClawSettingTab extends PluginSettingTab {
             this.plugin.settings.sessionKey = value || "main";
             await this.plugin.saveSettings();
             this.plugin.chatView?.syncFromSettings();
-          })
+          }),
       )
       .addButton((btn) =>
-        btn
-          .setButtonText("Reset to main")
-          .onClick(async () => {
-            this.plugin.settings.sessionKey = "main";
-            await this.plugin.saveSettings();
-            this.display(); // refresh the settings UI
-            this.plugin.chatView?.syncFromSettings();
-            new Notice("Reset to main conversation");
-          })
+        btn.setButtonText("Reset to main").onClick(async () => {
+          this.plugin.settings.sessionKey = "main";
+          await this.plugin.saveSettings();
+          this.display(); // refresh the settings UI
+          this.plugin.chatView?.syncFromSettings();
+          new Notice("Reset to main conversation");
+        }),
       );
 
     // ─── Behavior ─────────────────────────────────────────────────
@@ -4527,11 +6233,16 @@ class OpenClawSettingTab extends PluginSettingTab {
           .setValue(!this.plugin.getCloseConfirmDisabled())
           .onChange((value) => {
             this.plugin.setCloseConfirmDisabled(!value);
-          })
+          }),
       );
 
     // ─── Connection (Advanced) ────────────────────────────────────
-    new Setting(containerEl).setName("Connection").setDesc("These are set automatically by the setup wizard. Edit manually only if you know what you're doing.").setHeading();
+    new Setting(containerEl)
+      .setName("Connection")
+      .setDesc(
+        "These are set automatically by the setup wizard. Edit manually only if you know what you're doing.",
+      )
+      .setHeading();
 
     new Setting(containerEl)
       .setName("Gateway URL")
@@ -4544,7 +6255,7 @@ class OpenClawSettingTab extends PluginSettingTab {
             const normalized = normalizeGatewayUrl(value);
             this.plugin.settings.gatewayUrl = normalized || value;
             await this.plugin.saveSettings();
-          })
+          }),
       );
 
     new Setting(containerEl)
@@ -4568,7 +6279,7 @@ class OpenClawSettingTab extends PluginSettingTab {
         btn.setButtonText("Reconnect").onClick(() => {
           void this.plugin.connectGateway();
           new Notice("OpenClaw: Reconnecting...");
-        })
+        }),
       );
   }
 }

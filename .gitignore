@@ -4,3 +4,4 @@ data.json
 .DS_Store
 .vercel
 landing/.vercel
+.claude/
