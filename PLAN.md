@@ -1,7 +1,8 @@
 # @-Mention File Attachments — Implementation Plan
 
-**Status:** Planning
-**Branch:** feat/at-mention
+**Status:** Phases 0–2 implemented; manual vault test + Phase 3 polish remain
+**Branch:** feat/at-mention (local only — not pushed; `main` untouched)
+**Last updated:** 2026-06-05
 **Parent idea:** ~/garden/idea/openclaw-obsidian-at-mention-files.md
 
 ---
@@ -14,12 +15,16 @@ Add inline `@`-mention file attachment to the ObsidianClaw chat input. Typing `@
 
 ## Current State
 
-The plugin has two attachment paths, both single-file only:
+The @-mention feature (Phase 2) is implemented on `feat/at-mention`, on top of the pre-existing multi-attachment support (Phase 1). Attachment paths:
 
-1. **Attach button** (paperclip icon in input row) → opens OS file picker via `<input type="file">` → `handleFileSelect()` processes the file
-2. **`AttachmentModal`** (line 1219) — `FuzzySuggestModal<TFile>` that searches vault files, but not wired to any button or command
+1. **Attach button** (＋ icon in input row) → OS file picker (`<input type="file" multiple>`) → `handleFileSelect()` → `classifyFile`/`truncate`/`wrapTextContent` → push to `pendingAttachments[]`
+2. **`@`-mention** → typing `@` opens the `InlineSuggest` dropdown of vault files → `chooseMention()` reads the file and pushes to `pendingAttachments[]`
+3. **Paste** → `handlePastedFile()` for clipboard images
+4. **`_AttachmentModal`** — `FuzzySuggestModal<TFile>`, defined but unused (kept for a possible "browse files" button)
 
-Both set `pendingAttachment: { name, content, vaultPath? } | null` (single attachment) and show a preview strip with `attachPreviewEl`.
+State is an array `pendingAttachments: { name, content, vaultPath?, base64?, mimeType? }[]`, rendered as removable chips in `attachPreviewEl`; `sendMessage()` concatenates text contents and sends images as base64.
+
+The test harness + CI gate (Phase 0) also live on this branch and reach `main` when `feat/at-mention` merges — origin `main` does not have `ci.yml` yet.
 
 ---
 
@@ -37,9 +42,9 @@ Goal: a **simple, plain, boring, reliable** test system with zero magic, so ever
 
 `main.ts` imports from `obsidian` at the top, and `obsidian` has no runtime — it's types only. Importing `main.ts` into a test would explode. So:
 
-- [ ] **Extract pure logic into `obsidian`-free modules.** Functions that do string/data work (no `App`, no `TFile`, no DOM) move into small files that import nothing from `obsidian`. These are what we unit-test.
-- [ ] Keep `main.ts` as the thin Obsidian-facing shell that imports those modules and wires them to the UI.
-- [x] First extraction target: `str()` extracted to `lib.ts`, imported by `main.ts`. Proves the harness on existing code. (Attachment content/truncation helpers come during Phase 1/2.)
+- [x] **Pure logic extracted into `obsidian`-free modules:** `lib.ts` (`str`) and `at-mention.ts` (`detectMention`, `rankMentions`, `classifyFile`, `truncate`, `wrapTextContent`) — no `obsidian` import; these are the unit-tested units.
+- [x] `main.ts` stays the Obsidian-facing shell and imports them. (Exception: the `InlineSuggest` DOM class lives in `main.ts` since it needs the DOM — not unit-tested, verified manually.)
+- [x] First extraction target: `str()` extracted to `lib.ts`, imported by `main.ts`. Proved the harness on existing code.
 
 ### 0.2 Wire it up — DONE
 
@@ -77,21 +82,20 @@ Don't chase 100% coverage of UI glue. Cover the logic that's easy to get subtly 
 
 Refactor from single to array. No UX changes — just plumbing so multiple files can be queued.
 
-### 1.1 Change data structure
+### 1.1 Change data structure — already in the codebase
 
-- [ ] Replace `pendingAttachment: { ... } | null` with `pendingAttachments: { ... }[] = []`
-- [ ] Update `handleFileSelect()` to push to array instead of replacing
-- [ ] Update `sendMessage()` to concatenate all attachment contents (not just one)
-- [ ] Update preview strip rendering to show all chips, each with `×` remove button
-- [ ] Update remove handler to splice from array instead of nulling
-- [ ] On send, clear the array instead of nulling
+- [x] `pendingAttachments: { ... }[] = []` (array, not single)
+- [x] `handleFileSelect()` pushes to the array
+- [x] `sendMessage()` concatenates all text attachment contents; images sent as base64
+- [x] Preview strip (`renderAttachPreview`) shows all chips, each with a `×` remove button
+- [x] Remove handler splices from the array
+- [x] On send, the array is cleared
 
 ### 1.2 Test
 
 **Unit (write-first):**
 
-- [ ] Extract the "concatenate attachment contents into the outgoing message" logic into a pure function `buildMessageBody(text, attachments[])` — test: 0, 1, and 2 attachments produce the right concatenation
-- [ ] Test that clearing the array after build leaves it empty
+- [ ] Optional: extract the send-time concat into a pure `buildMessageBody(text, attachments[])` and test 0/1/2 attachments. Not done — the concat still lives inline in `sendMessage()`. Low priority; revisit if that logic gets hairier.
 
 **Manual (in Obsidian):**
 
@@ -122,55 +126,55 @@ The core feature. A custom dropdown positioned below the textarea that fuzzy-sea
 
 Create a new class (in `main.ts` or a separate file imported) that:
 
-- [ ] Renders a positioned `<div>` below the textarea with a scrollable list of vault files
-- [ ] Uses Obsidian's `prepareQuery()` + `fuzzySearch()` for ranking and highlighting
-- [ ] Caches `app.vault.getFiles()` and refreshes on vault events (`create`, `rename`, `delete`)
-- [ ] Ranks results: recently-modified first (via `file.stat.mtime`), then by fuzzy score
-- [ ] Shows file path (not just basename) for disambiguation — `folder/note.md` not just `note.md`
-- [ ] Limits display to ~50 results max for performance
+- [x] Renders a positioned `<div>` (above the input area) with a scrollable list of vault files
+- [x] Uses Obsidian's `prepareFuzzySearch()` for ranking (the actual API in this version, not `prepareQuery`/`fuzzySearch`)
+- [ ] Caches `app.vault.getFiles()` and refreshes on vault events — **not done**; currently calls `getFiles()` per keystroke. Moved to Phase 3 (perf).
+- [x] Ranks results: recency-first when query is empty; score-desc then recency when querying (`rankMentions`)
+- [x] Shows file path for disambiguation (basename prominent, folder muted)
+- [x] Limits display to 50 results
 
 ### 2.2 Trigger logic
 
 Hook into the textarea's `input` and `keydown` events:
 
-- [ ] On `input`: detect `@` typed after whitespace or at start of line → open suggest
-- [ ] Do NOT trigger `@` when it's mid-word (e.g. `email@domain`) — only after whitespace/start
-- [ ] On further input after trigger: update the search query (everything after `@` until cursor)
-- [ ] On `@@`: insert literal `@`, skip picker
-- [ ] On Escape: close picker, remove the `@` + query text from textarea
-- [ ] On Backspace: if query is empty, close picker and remove the `@`
+- [x] On `input`: detect `@` after whitespace or at start → open suggest
+- [x] Do NOT trigger mid-word (`email@domain`) — `detectMention` only fires at a word boundary
+- [x] On further input: update the query (everything after `@` until cursor)
+- [x] `@@`: skip picker — handled at detection (`@@` doesn't trigger), so no special insert step needed
+- [~] Escape: closes the picker but does **not** delete the typed `@query` (deliberate deviation — deleting text on Escape felt destructive)
+- [x] Backspace with empty query: closes — implicit, since deleting the `@` makes `detectMention` return null
 
 ### 2.3 Keyboard navigation
 
-- [ ] ArrowDown / ArrowUp: move highlight in the dropdown
-- [ ] Enter: select the highlighted file
-- [ ] Escape: close picker without selecting
+- [x] ArrowDown / ArrowUp: move highlight (wraps around)
+- [x] Enter / Tab: select the highlighted file
+- [x] Escape: close picker without selecting
 
 ### 2.4 Selection behavior
 
 When a file is selected:
 
-- [ ] Remove the `@` + query text from the textarea
-- [ ] Add the file to `pendingAttachments` array
-- [ ] Add a chip to the preview strip (file name, `×` to remove)
-- [ ] Close the dropdown
-- [ ] Don't move cursor — leave it where the `@` was, so user can keep typing the message
+- [x] Remove the `@` + query text from the textarea (`removeMentionText`)
+- [x] Add the file to `pendingAttachments`
+- [x] Add a chip to the preview strip (via `renderAttachPreview`)
+- [x] Close the dropdown
+- [x] Leave the caret where the `@` was, so the user can keep typing
 
 ### 2.5 File content handling
 
-Reuse the existing logic from `handleFileSelect()`:
+Shares the pure helpers with `handleFileSelect()`:
 
-- [ ] Text files (`.md`, `.txt`, `.json`, etc.): read with `app.vault.read(file)`, wrap in `\n\nFile: filename.md\n\`\`\`\n{content}\n\`\`\``
-- [ ] Image files: save to `openclaw-attachments/` via `app.vault.createBinary()`, reference absolute path
-- [ ] Other binary: descriptive attachment line
-- [ ] Truncate text files at 10K chars (same limit as current)
+- [x] Text files: `app.vault.read(file)` → `wrapTextContent(name, truncate(content))`
+- [~] Image files: read via `readBinary` + `arrayBufferToBase64` and send as base64 (deviation — plan said copy into `openclaw-attachments/` via `createBinary`; base64 reuses the existing image send path and avoids writing into the vault). No resize yet (file-picker images are resized; vault images are not).
+- [x] Other binary: descriptive `[Attached file: …]` line
+- [x] Truncate text files at 10K chars
 
 ### 2.6 CSS
 
-- [ ] Style the dropdown to match Obsidian's native suggest overlay (`.suggestion` classes)
-- [ ] Position below textarea using caret coordinates (a lightweight caret-position helper or character-width estimation)
-- [ ] Dark/light theme support (the plugin already follows Obsidian theme)
-- [ ] Chips in the preview strip: horizontal scroll, subtle background, `×` close button
+- [x] Styled to match Obsidian's suggest overlay (popover bg, border, hover highlight) — `.openclaw-suggest*` in `styles.css`
+- [~] Positioning: used **option 3** (fixed, anchored above the input area), not caret coordinates — simpler and what most chat UIs do
+- [x] Dark/light theme via Obsidian CSS vars
+- [x] Chips in the preview strip (pre-existing `.openclaw-attach-chip` styling)
 
 ### 2.7 Test
 
@@ -224,12 +228,12 @@ Reuse the existing logic from `handleFileSelect()`:
 ### Key Obsidian APIs
 
 - `app.vault.getFiles()` — returns `TFile[]` for all files in vault
+- `app.vault.getAbstractFileByPath(path)` — resolve a `TFile` from a path (instanceof-check the result)
 - `app.vault.read(file: TFile)` — read file content (text)
 - `app.vault.readBinary(file: TFile)` — read binary content
-- `app.vault.createBinary(path, data)` — create binary file
-- `prepareQuery(query: string)` — from `obsidian` module, creates a query object for fuzzy search
-- `fuzzySearch(query, text)` — from `obsidian` module, returns `FuzzySearchResult | null`
-- `app.vault.on('create' | 'modify' | 'rename' | 'delete', callback)` — vault file events
+- `arrayBufferToBase64(buf)` — from `obsidian`; used to base64-encode vault images
+- `prepareFuzzySearch(query: string)` — from `obsidian`; returns `(text) => SearchResult | null` where `SearchResult.score` ranks the match. (This version has no `prepareQuery`/`fuzzySearch` exports.)
+- `app.vault.on('create' | 'modify' | 'rename' | 'delete', callback)` — vault file events (for the Phase 3 file-list cache)
 
 ### Caret position
 
@@ -241,6 +245,8 @@ Textarea doesn't expose caret pixel coordinates natively. Options:
 
 **Recommendation:** Start with option 3. If it feels wrong, upgrade to option 1 later.
 
+**Decision:** Shipped option 3 (dropdown anchored above the input area). Revisit only if per-caret positioning is requested.
+
 ### Existing AttachmentModal
 
-The `AttachmentModal` at line 1219 is defined but not wired up. It could become a "browse all files" button or stay unused. Don't remove it — it's not hurting anything and could be useful later.
+`_AttachmentModal` (a `FuzzySuggestModal<TFile>`) is defined but not wired up. It could become a "browse all files" button or stay unused. Don't remove it — it's harmless and could be useful later.
