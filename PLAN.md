@@ -23,6 +23,54 @@ Both set `pendingAttachment: { name, content, vaultPath? } | null` (single attac
 
 ---
 
+## Phase 0: Test Harness (do this first — TDD)
+
+Goal: a **simple, plain, boring, reliable** test system with zero magic, so every phase below can be written test-first. No new test framework, no config files, no transpile step beyond what we already need.
+
+### Choice: Node's built-in test runner
+
+- **Runner:** `node:test` (built into Node ≥18) + `node:assert/strict`. No Jest, no Vitest, no extra runtime deps.
+- **TypeScript:** run tests through `tsx` (one devDependency) so `.test.ts` files run directly — no separate compile/output step.
+- **Why boring wins:** the runner ships with Node, the assertions are stdlib, and there's no config to drift. If `tsx` ever breaks, `tsc` + plain `node` still runs the emitted JS.
+
+### 0.1 The obsidian-import problem
+
+`main.ts` imports from `obsidian` at the top, and `obsidian` has no runtime — it's types only. Importing `main.ts` into a test would explode. So:
+
+- [ ] **Extract pure logic into `obsidian`-free modules.** Functions that do string/data work (no `App`, no `TFile`, no DOM) move into small files that import nothing from `obsidian`. These are what we unit-test.
+- [ ] Keep `main.ts` as the thin Obsidian-facing shell that imports those modules and wires them to the UI.
+- [x] First extraction target: `str()` extracted to `lib.ts`, imported by `main.ts`. Proves the harness on existing code. (Attachment content/truncation helpers come during Phase 1/2.)
+
+### 0.2 Wire it up — DONE
+
+- [x] Add `tsx` to `devDependencies`
+- [x] Add scripts: `"test": "node --import tsx --test \"**/*.test.ts\""` and `"test:watch": "… --watch …"` (using `node --import tsx` so Node does the glob expansion and runs its built-in test runner)
+- [x] Convention: a module `foo.ts` is tested by a sibling `foo.test.ts`
+- [x] `tsconfig.json` `include` already covers `.test.ts` (globs `**/*.ts`); esbuild entry stays `main.ts`, so test files never ship in `main.js` (verified: `grep` of `main.js` for test strings = 0)
+- Note: use named imports for node stdlib in tests (`import { strict as assert } from "node:assert"`) — the repo's tsconfig has no `allowSyntheticDefaultImports`, so default-importing `node:assert/strict` fails typecheck.
+
+### 0.3 Prove it — DONE
+
+- [x] `lib.test.ts` covers `str()`, `npm test` passes (2 tests green)
+- [x] Typecheck + build stay green after the extraction
+- [ ] (optional) Make a test fail on purpose to confirm non-zero exit — the CI gate already relies on this
+
+### 0.4 CI gate — DONE
+
+- [x] `.github/workflows/ci.yml`: on every PR to `main` (and push to `main`) runs install → lint → typecheck → **test** → build, as job `build-and-test`
+- [x] Branch protection on `main`: requires the `build-and-test` check to pass (strict / up-to-date with base) and a PR before merging (0 approvals required). `enforce_admins: false` leaves an owner escape hatch. **This is what actually blocks a merge when tests fail.**
+
+### TDD workflow for the phases below
+
+For each unit of pure logic: **write the failing test first**, then the implementation, then refactor. The per-phase "Test" subsections below are split into:
+
+- **Unit (automated, write-first):** pure logic with `node:test` — trigger detection, query extraction, fuzzy ranking, content wrapping, truncation. These gate every commit.
+- **Manual (in Obsidian):** anything touching the DOM, the dropdown overlay, keyboard focus, or real vault I/O. Verified by hand in a live vault, as today.
+
+Don't chase 100% coverage of UI glue. Cover the logic that's easy to get subtly wrong (the `@`-trigger rules, query slicing, truncation boundaries) and leave the rendering to manual checks.
+
+---
+
 ## Phase 1: Multiple Attachments
 
 Refactor from single to array. No UX changes — just plumbing so multiple files can be queued.
@@ -37,6 +85,13 @@ Refactor from single to array. No UX changes — just plumbing so multiple files
 - [ ] On send, clear the array instead of nulling
 
 ### 1.2 Test
+
+**Unit (write-first):**
+
+- [ ] Extract the "concatenate attachment contents into the outgoing message" logic into a pure function `buildMessageBody(text, attachments[])` — test: 0, 1, and 2 attachments produce the right concatenation
+- [ ] Test that clearing the array after build leaves it empty
+
+**Manual (in Obsidian):**
 
 - [ ] Attach two text files via the file chooser, verify both contents appear in the sent message
 - [ ] Remove one chip, verify only the remaining file is sent
@@ -105,6 +160,18 @@ Reuse the existing logic from `handleFileSelect()`:
 
 ### 2.7 Test
 
+**Unit (write-first — these are the bug-prone bits, test them hard):**
+
+- [ ] `detectTrigger(text, cursorPos)` → returns the active `@`-query or null. Cover: `@` at start of line, `@` after whitespace, `email@domain` (no trigger), `@@` (literal, no trigger), `@` mid-message after punctuation
+- [ ] `extractQuery(text, cursorPos)` → the substring from `@` to cursor. Cover: empty query, multi-char, query with no match
+- [ ] Fuzzy ranking comparator (recently-modified first, then fuzzy score) over a fixed list of fake file records `{path, mtime}` — deterministic input, asserted order
+- [ ] `wrapTextContent(name, content)` → the ` \n\nFile: …\n\`\`\`\n…\n\`\`\` ` wrapper, exact string
+- [ ] `truncate(content, 10_000)` → boundary cases: 9999, 10000, 10001 chars
+
+> Note: the ranking/fuzzy helpers take plain `{path, mtime}` records, not `TFile`, so they stay `obsidian`-free and testable. `main.ts` maps real `TFile`s onto them.
+
+**Manual (in Obsidian):**
+
 - [ ] Type `@` — dropdown appears with vault files
 - [ ] Type `@proj` — dropdown filters to files matching "proj"
 - [ ] Arrow keys navigate, Enter selects
@@ -135,8 +202,9 @@ Reuse the existing logic from `handleFileSelect()`:
 
 ### Where to add code
 
-- `InlineSuggest` class: add directly in `main.ts` (keeping with the single-file convention) or as `suggest.ts` imported at the top — single-file is the current convention
-- All changes to `OpenClawChatView`: inline in the existing class methods
+- **Pure logic → `obsidian`-free modules** (e.g. `at-mention.ts`): trigger detection, query extraction, ranking comparator, content wrapping, truncation. These are the unit-tested units. This is a deliberate break from the single-file convention, and it's the whole reason testing is tractable — keep these files free of any `obsidian` import.
+- `InlineSuggest` class (the DOM/overlay piece): add in `main.ts` or a `suggest.ts` that imports `obsidian`. Not unit-tested; verified manually.
+- All changes to `OpenClawChatView`: inline in the existing class methods, delegating logic to the pure modules
 - CSS: add to `styles.css`
 
 ### Key Obsidian APIs
