@@ -6,6 +6,7 @@ import {
   Modal,
   Notice,
   Platform,
+  prepareFuzzySearch,
   Plugin,
   PluginSettingTab,
   Setting,
@@ -14,7 +15,7 @@ import {
   setIcon,
 } from "obsidian";
 import { str } from "./lib";
-import { classifyFile, truncate, wrapTextContent } from "./at-mention";
+import { classifyFile, truncate, wrapTextContent, detectMention, rankMentions } from "./at-mention";
 
 // ─── Settings ────────────────────────────────────────────────────────
 
@@ -1476,6 +1477,7 @@ class OpenClawChatView extends ItemView {
   private typingEl!: HTMLElement;
   private attachPreviewEl!: HTMLElement;
   private suggest!: InlineSuggest;
+  private activeMention: { query: string; start: number } | null = null;
   private fileInputEl!: HTMLInputElement;
   private pendingAttachments: { name: string; content: string; vaultPath?: string; base64?: string; mimeType?: string }[] = [];
   private sending = false;
@@ -1676,6 +1678,7 @@ class OpenClawChatView extends ItemView {
     this.attachPreviewEl.addClass("oc-hidden");
     // @-mention file picker dropdown (anchored to the input area)
     this.suggest = new InlineSuggest(inputArea);
+    this.suggest.onChoose = (item) => this.chooseMention(item);
     this.abortBtn = inputRow.createEl("button", { cls: "openclaw-abort-btn", attr: { "aria-label": "Stop" } });
     setIcon(this.abortBtn, "square");
     this.abortBtn.addClass("oc-hidden");
@@ -1709,6 +1712,10 @@ class OpenClawChatView extends ItemView {
     this.inputEl.addEventListener("input", () => {
       this.autoResize();
       this.updateSendButton();
+      this.updateMentionSuggest();
+    });
+    this.inputEl.addEventListener("blur", () => {
+      if (this.suggest.isOpen) this.closeMentionSuggest();
     });
     this.inputEl.addEventListener("focus", () => {
       window.setTimeout(() => {
@@ -3298,6 +3305,43 @@ class OpenClawChatView extends ItemView {
 
 
 
+
+  /** Recompute the @-mention dropdown from the current caret position. */
+  private updateMentionSuggest(): void {
+    const cursor = this.inputEl.selectionStart ?? this.inputEl.value.length;
+    const mention = detectMention(this.inputEl.value, cursor);
+    if (!mention) {
+      this.closeMentionSuggest();
+      return;
+    }
+    this.activeMention = mention;
+    const items = this.mentionItems(mention.query);
+    if (this.suggest.isOpen) this.suggest.update(items);
+    else this.suggest.show(items);
+  }
+
+  private closeMentionSuggest(): void {
+    this.activeMention = null;
+    this.suggest.close();
+  }
+
+  /** Rank vault files for the dropdown, using Obsidian fuzzy search when querying. */
+  private mentionItems(query: string): SuggestItem[] {
+    const files = this.app.vault.getFiles().map((f) => ({ path: f.path, mtime: f.stat.mtime }));
+    const matcher = query ? prepareFuzzySearch(query) : null;
+    const score = (_q: string, path: string): number | null => {
+      if (!matcher) return 0;
+      const result = matcher(path);
+      return result ? result.score : null;
+    };
+    return rankMentions(files, query, score, 50).map((f) => ({ path: f.path, display: f.path }));
+  }
+
+  /** Handle a file chosen from the @-mention dropdown. */
+  private chooseMention(_item: SuggestItem): void {
+    // Selection wiring (replace the @query, attach the file) lands next.
+    this.closeMentionSuggest();
+  }
 
   async handleFileSelect(): Promise<void> {
     const files = this.fileInputEl.files;
