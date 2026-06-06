@@ -14,6 +14,7 @@ import {
   setIcon,
 } from "obsidian";
 import { str } from "./lib";
+import { classifyFile, truncate, wrapTextContent } from "./at-mention";
 
 // ─── Settings ────────────────────────────────────────────────────────
 
@@ -3210,12 +3211,9 @@ class OpenClawChatView extends ItemView {
 
     for (const file of Array.from(files)) {
       try {
-        const isImage = file.type.startsWith("image/");
-        const isText = file.type.startsWith("text/") ||
-          ["application/json", "application/yaml", "application/xml", "application/javascript"].includes(file.type) ||
-          /\.(md|txt|json|csv|yaml|yml|js|ts|py|html|css|xml|toml|ini|sh|log)$/i.test(file.name);
+        const kind = classifyFile({ name: file.name, mimeType: file.type });
 
-        if (isImage) {
+        if (kind === "image") {
           const resized = await this.resizeImage(file, 2048, 0.85);
           this.pendingAttachments.push({
             name: file.name,
@@ -3223,12 +3221,11 @@ class OpenClawChatView extends ItemView {
             base64: resized.base64,
             mimeType: resized.mimeType,
           });
-        } else if (isText) {
+        } else if (kind === "text") {
           const content = await file.text();
-          const truncated = content.length > 10000 ? content.slice(0, 10000) + "\n...(truncated)" : content;
           this.pendingAttachments.push({
             name: file.name,
-            content: `File: ${file.name}\n\`\`\`\n${truncated}\n\`\`\``,
+            content: wrapTextContent(file.name, truncate(content)),
           });
         } else {
           this.pendingAttachments.push({

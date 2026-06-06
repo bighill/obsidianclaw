@@ -71,7 +71,9 @@ Don't chase 100% coverage of UI glue. Cover the logic that's easy to get subtly 
 
 ---
 
-## Phase 1: Multiple Attachments
+## Phase 1: Multiple Attachments — ALREADY IMPLEMENTED
+
+> Discovered during Phase 2 work: the code already uses `pendingAttachments: [...]` with push-on-attach, per-chip `×` removal (`renderAttachPreview`), multi-file concat in `sendMessage`, and array-clear on send. The 1.1 checklist below is left for reference; it's done. The pure file-handling logic (`classifyFile` / `truncate` / `wrapTextContent`) was extracted to `at-mention.ts` and `handleFileSelect` now delegates to it, with unit tests.
 
 Refactor from single to array. No UX changes — just plumbing so multiple files can be queued.
 
@@ -160,15 +162,15 @@ Reuse the existing logic from `handleFileSelect()`:
 
 ### 2.7 Test
 
-**Unit (write-first — these are the bug-prone bits, test them hard):**
+**Unit (write-first — these are the bug-prone bits, test them hard):** — in `at-mention.ts` / `at-mention.test.ts`
 
-- [ ] `detectTrigger(text, cursorPos)` → returns the active `@`-query or null. Cover: `@` at start of line, `@` after whitespace, `email@domain` (no trigger), `@@` (literal, no trigger), `@` mid-message after punctuation
-- [ ] `extractQuery(text, cursorPos)` → the substring from `@` to cursor. Cover: empty query, multi-char, query with no match
-- [ ] Fuzzy ranking comparator (recently-modified first, then fuzzy score) over a fixed list of fake file records `{path, mtime}` — deterministic input, asserted order
-- [ ] `wrapTextContent(name, content)` → the ` \n\nFile: …\n\`\`\`\n…\n\`\`\` ` wrapper, exact string
-- [ ] `truncate(content, 10_000)` → boundary cases: 9999, 10000, 10001 chars
+- [x] `detectMention(text, cursor)` → active `@`-query + `@` index, or null. Covers: `@` at start, after whitespace, after newline, `email@domain` (no trigger), `@@`/`@@foo` (literal escape), whitespace closing the mention, nearest-`@` selection, query sliced to cursor. (Folds in `extractQuery` — it returns the query directly.)
+- [x] `classifyFile({name, mimeType})` → `image | text | binary`, by mime then extension. (Also now dedupes `handleFileSelect`.)
+- [x] `wrapTextContent(name, content)` → `File: …\n\`\`\`\n…\n\`\`\`` exact string (the `\n\n` separator is added at send-time concat, not here — matches existing behavior)
+- [x] `truncate(content, 10_000)` → boundary cases: at-limit untouched, one-over clipped + marker
+- [ ] Fuzzy ranking comparator (recency + fuzzy score) over fixed `{path, mtime, score}` records — deterministic order. **Next**, alongside the dropdown wiring.
 
-> Note: the ranking/fuzzy helpers take plain `{path, mtime}` records, not `TFile`, so they stay `obsidian`-free and testable. `main.ts` maps real `TFile`s onto them.
+> Note: the ranking/fuzzy helpers will take plain `{path, mtime, score}` records, not `TFile`, so they stay `obsidian`-free and testable. `main.ts` runs Obsidian's `fuzzySearch` to compute `score`, then maps real `TFile`s onto them.
 
 **Manual (in Obsidian):**
 
