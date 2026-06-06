@@ -6,6 +6,7 @@ export type FileKind = "image" | "text" | "binary";
 
 const TEXT_MIME = ["application/json", "application/yaml", "application/xml", "application/javascript"];
 const TEXT_EXT = /\.(md|txt|json|csv|yaml|yml|js|ts|py|html|css|xml|toml|ini|sh|log)$/i;
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|avif)$/i;
 
 /** Clip text content to `max` chars, appending a marker when clipped. */
 export function truncate(content: string, max = 10000): string {
@@ -19,7 +20,7 @@ export function wrapTextContent(name: string, content: string): string {
 
 /** Bucket a file by mime type, falling back to extension, then binary. */
 export function classifyFile({ name, mimeType }: { name: string; mimeType: string }): FileKind {
-  if (mimeType.startsWith("image/")) return "image";
+  if (mimeType.startsWith("image/") || IMAGE_EXT.test(name)) return "image";
   if (mimeType.startsWith("text/") || TEXT_MIME.includes(mimeType) || TEXT_EXT.test(name)) return "text";
   return "binary";
 }

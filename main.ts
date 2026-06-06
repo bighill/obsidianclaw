@@ -6,6 +6,7 @@ import {
   Modal,
   Notice,
   Platform,
+  arrayBufferToBase64,
   prepareFuzzySearch,
   Plugin,
   PluginSettingTab,
@@ -1311,6 +1312,14 @@ print('Config fixed: bind=loopback, tailscale.mode=serve')
 
 // ─── Inline @-mention suggest ────────────────────────────────────────
 
+/** Best-effort image MIME from a vault file extension (for base64 sends). */
+function imageMimeFromExt(ext: string): string {
+  const e = ext.toLowerCase();
+  if (e === "jpg" || e === "jpeg") return "image/jpeg";
+  if (e === "svg") return "image/svg+xml";
+  return `image/${e}`;
+}
+
 interface SuggestItem { path: string; display: string }
 
 /**
@@ -1678,7 +1687,7 @@ class OpenClawChatView extends ItemView {
     this.attachPreviewEl.addClass("oc-hidden");
     // @-mention file picker dropdown (anchored to the input area)
     this.suggest = new InlineSuggest(inputArea);
-    this.suggest.onChoose = (item) => this.chooseMention(item);
+    this.suggest.onChoose = (item) => void this.chooseMention(item);
     this.abortBtn = inputRow.createEl("button", { cls: "openclaw-abort-btn", attr: { "aria-label": "Stop" } });
     setIcon(this.abortBtn, "square");
     this.abortBtn.addClass("oc-hidden");
@@ -1703,7 +1712,7 @@ class OpenClawChatView extends ItemView {
         if (e.key === "Escape") { e.preventDefault(); this.closeMentionSuggest(); return; }
         if (e.key === "Enter" || e.key === "Tab") {
           const item = this.suggest.current();
-          if (item) { e.preventDefault(); this.chooseMention(item); return; }
+          if (item) { e.preventDefault(); void this.chooseMention(item); return; }
         }
       }
       if (e.key === "Enter") {
@@ -3348,9 +3357,44 @@ class OpenClawChatView extends ItemView {
   }
 
   /** Handle a file chosen from the @-mention dropdown. */
-  private chooseMention(_item: SuggestItem): void {
-    // Selection wiring (replace the @query, attach the file) lands next.
+  private async chooseMention(item: SuggestItem): Promise<void> {
+    const mention = this.activeMention;
     this.closeMentionSuggest();
+    if (mention) this.removeMentionText(mention);
+
+    const file = this.app.vault.getAbstractFileByPath(item.path);
+    if (!(file instanceof TFile)) return;
+    try {
+      const kind = classifyFile({ name: file.name, mimeType: "" });
+      if (kind === "image") {
+        const base64 = arrayBufferToBase64(await this.app.vault.readBinary(file));
+        this.pendingAttachments.push({
+          name: file.name,
+          content: `[Attached image: ${file.name}]`,
+          base64,
+          mimeType: imageMimeFromExt(file.extension),
+          vaultPath: file.path,
+        });
+      } else if (kind === "text") {
+        const content = await this.app.vault.read(file);
+        this.pendingAttachments.push({ name: file.name, content: wrapTextContent(file.name, truncate(content)) });
+      } else {
+        this.pendingAttachments.push({ name: file.name, content: `[Attached file: ${file.name}]` });
+      }
+      this.renderAttachPreview();
+    } catch (e) {
+      new Notice(`Failed to attach ${file.name}: ${e}`);
+    }
+  }
+
+  /** Strip the `@query` text the mention came from, leaving the caret in its place. */
+  private removeMentionText(mention: { query: string; start: number }): void {
+    const value = this.inputEl.value;
+    const end = mention.start + 1 + mention.query.length;
+    this.inputEl.value = value.slice(0, mention.start) + value.slice(end);
+    this.inputEl.setSelectionRange(mention.start, mention.start);
+    this.autoResize();
+    this.updateSendButton();
   }
 
   async handleFileSelect(): Promise<void> {

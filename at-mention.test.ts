@@ -41,6 +41,13 @@ test("classifyFile detects text by mime", () => {
   assert.equal(classifyFile({ name: "x", mimeType: "application/json" }), "text");
 });
 
+test("classifyFile detects images by extension when mime is empty", () => {
+  // Vault files give us an extension but no mime type.
+  assert.equal(classifyFile({ name: "diagram.PNG", mimeType: "" }), "image");
+  assert.equal(classifyFile({ name: "photo.jpeg", mimeType: "" }), "image");
+  assert.equal(classifyFile({ name: "icon.svg", mimeType: "" }), "image");
+});
+
 test("classifyFile detects text by extension when mime is empty", () => {
   assert.equal(classifyFile({ name: "README.md", mimeType: "" }), "text");
   assert.equal(classifyFile({ name: "Config.YAML", mimeType: "" }), "text");
